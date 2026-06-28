@@ -23,9 +23,10 @@ import threading
 import time
 from pathlib import Path
 
+from . import adapters
 from . import readers
 from .config import Config
-from .session import TmuxSession
+from .session import SessionError, TmuxSession
 from .telegram import TelegramClient
 
 log = logging.getLogger("agent2telegram.attach")
@@ -89,6 +90,33 @@ def _extract_tui_tools(pane: str) -> list:
     return out
 
 
+def _expected_agent_commands(cfg: Config) -> list[str]:
+    """Commands that are allowed to own the tmux pane before we send keys into it."""
+    commands: list[str] = []
+    cls = adapters.REGISTRY.get(cfg.agent)
+    if cls is not None:
+        commands.extend(cls.tui_launch()[:1])
+        if cls.binary:
+            commands.append(cls.binary)
+    if cfg.command:
+        commands.append(cfg.command[0])
+    if cfg.continue_command:
+        commands.append(cfg.continue_command[0])
+
+    seen = set()
+    out = []
+    for command in commands:
+        name = Path(str(command)).name
+        if name and name not in seen:
+            seen.add(name)
+            out.append(name)
+    if not out:
+        raise ValueError(
+            "attach mode cannot verify the tmux pane: configure an agent command to allow"
+        )
+    return out
+
+
 class AttachBridge:
     def __init__(self, cfg: Config, *, client: TelegramClient | None = None) -> None:
         if not cfg.tmux_session:
@@ -121,8 +149,10 @@ class AttachBridge:
         # the newest one (and re-detect if the session restarts). Claude Code uses a fixed path.
         self._transcript = self._resolve_transcript()
         self._last_resolve = 0.0
+        expected_agent_commands = _expected_agent_commands(cfg)
         self._session = TmuxSession([], name=cfg.tmux_session, cwd=Path.home(),
-                                    origin_prefix=cfg.origin_prefix, boot_wait=0)
+                                    origin_prefix=cfg.origin_prefix, boot_wait=0,
+                                    expected_agent_commands=expected_agent_commands)
         self._stop = threading.Event()
         # Persisted ledger of already-forwarded message uuids — survives restarts/crashes/reboots
         # so resuming an interrupted turn never re-sends what was already delivered.
@@ -145,6 +175,7 @@ class AttachBridge:
         self._typing_count = 0                       # diagnostics: typing actions in current turn
         self._turn_started = 0.0                     # diagnostics: monotonic ts of turn start
         self._max_gap = 0.0                          # diagnostics: largest gap between typing actions
+        self._last_pane_warning = 0.0                # throttle unsafe-pane owner alerts
         # Persist the bubble's message_id so a restart/crash mid-turn can delete the orphan it
         # would otherwise leave behind in the chat.
         self._status_path = (self._signal.parent / "status_bubble") if self._signal else None
@@ -524,9 +555,31 @@ class AttachBridge:
         self._last_activity = time.monotonic()   # keep typing lit from the very start
         try:
             self._session.inject(text)
+        except SessionError as e:
+            log.error("inject failed: %s", e)
+            self._turn_active.clear()
+            if "refusing to inject" in str(e):
+                self._notify_unsafe_pane(str(e))
         except Exception as e:
             log.error("inject failed: %s", e)
             self._turn_active.clear()
+
+    def _notify_unsafe_pane(self, reason: str) -> None:
+        if not self._owner_chat:
+            return
+        now = time.monotonic()
+        if now - self._last_pane_warning < 60:
+            return
+        self._last_pane_warning = now
+        try:
+            self.tg.send_message(
+                self._owner_chat,
+                "⚠️ Agent2Telegram blocked a Telegram message because the configured tmux "
+                f"session no longer appears to be running the expected agent.\n\n{reason}\n\n"
+                "Restart the agent in that tmux pane, then resend the message.",
+            )
+        except Exception as e:
+            log.warning("unsafe-pane owner notification failed: %s", e)
 
     def _handle_command(self, text: str, chat_id: int, message_id: int | None = None) -> bool:
         """Answer a bridge-level slash command. Returns True if handled (don't forward to agent)."""
