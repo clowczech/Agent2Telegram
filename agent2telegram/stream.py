@@ -87,7 +87,9 @@ class StreamBridge(AttachBridge):
         except OSError:
             self._sent_keys = set()
         self._turn_active = threading.Event()
+        self._init_inbound_queue()
         self._turn_from_tg = True                  # every turn here is Telegram-originated
+        self._transcript = None                    # _finish_turn backstop is transcript-only
         self._last_activity = 0.0
         self._status = {"mid": None, "shown": ""}
         self._last_typing = 0.0
@@ -96,6 +98,7 @@ class StreamBridge(AttachBridge):
         self._max_gap = 0.0
         self._status_path = (self._signal.parent / "stream_status_bubble") if self._signal else None
         self._seen_tools: set = set()
+        self._turn_text_sent = False
         self._pending_turn_end = False
         # ---- Codex stream specifics ----
         self._thread_id: str | None = None         # conversation id → resume keeps context
