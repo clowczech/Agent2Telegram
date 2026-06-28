@@ -495,7 +495,8 @@ class AttachBridge:
         try:
             update_id = int(raw_id)
         except (TypeError, ValueError):
-            update_id = None
+            log.warning("skipping malformed Telegram update without a valid update_id: %r", upd)
+            return offset
         next_offset = max(offset, update_id + 1) if update_id is not None else offset
         if update_id is not None and update_id < offset:
             return offset
@@ -691,7 +692,9 @@ class AttachBridge:
                 return
         elif msg.get("photo") or msg.get("document"):
             note = self._download_note(msg, chat_id)
-            text = f"{text}\n{note}".strip() if note else text
+            if not note:
+                return
+            text = f"{text}\n{note}".strip()
         if text:
             text = self._limit_inbound_prompt(text, chat_id)
             if not text:
@@ -967,7 +970,10 @@ class AttachBridge:
 
     def _status_clear(self) -> None:
         if self._status["mid"] is not None and self._owner_chat is not None:
-            self.tg.delete_message(self._owner_chat, self._status["mid"])
+            try:
+                self.tg.delete_message(self._owner_chat, self._status["mid"])
+            except Exception as e:
+                log.warning("status bubble cleanup failed: %s", e)
         self._status = {"mid": None, "shown": ""}
         self._seen_tools.clear()
         self._persist_status(None)

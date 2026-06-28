@@ -12,12 +12,23 @@ class SanitizeForTmuxTests(unittest.TestCase):
         text = "Hello, world 123. Regular punctuation: []{};:,./?\n\tDone."
         self.assertEqual(sanitize_for_tmux(text), text)
 
+    def test_empty_text_stays_empty(self):
+        self.assertEqual(sanitize_for_tmux(""), "")
+
+    def test_unicode_is_preserved(self):
+        text = "Žluťoučký kůň ✅ Привет こんにちは 🚀"
+        self.assertEqual(sanitize_for_tmux(text), text)
+
     def test_control_characters_are_stripped_except_newline_and_tab(self):
         control_chars = "".join(chr(i) for i in [*range(0x20), 0x7f, *range(0x80, 0xa0)])
         self.assertEqual(sanitize_for_tmux(f"a{control_chars}b"), "a\t\nb")
 
     def test_text_is_truncated(self):
         text = "x" * (MAX_TMUX_INJECTION_CHARS + 1)
+        self.assertEqual(sanitize_for_tmux(text), "x" * MAX_TMUX_INJECTION_CHARS)
+
+    def test_truncation_counts_only_surviving_characters(self):
+        text = ("\x00" * 100) + ("x" * (MAX_TMUX_INJECTION_CHARS + 50))
         self.assertEqual(sanitize_for_tmux(text), "x" * MAX_TMUX_INJECTION_CHARS)
 
 
@@ -38,12 +49,24 @@ class TmuxSessionSendKeysTests(unittest.TestCase):
             s = object.__new__(TmuxSession)
             s.name = "a2t-test"
             s._origin = "from tg: "
+            s._expected_agent_commands = ()
             s._send_keys("hello\x0bthere\x03\x1b[31m\x7fworld\x85!")
 
         calls = [call.args for call in tmux.call_args_list]
         literal_calls = [c for c in calls if c[:5] == ("send-keys", "-t", "a2t-test", "-l", "--")]
         self.assertEqual(len(literal_calls), 1)
         self.assertEqual(literal_calls[0][-1], "from tg: hellothere[31mworld!")
+
+    def test_send_keys_collapses_newlines_to_one_literal_submit(self):
+        with patch.object(session, "_tmux") as tmux, patch.object(session.time, "sleep"):
+            s = self._bare(())
+            s._send_keys("first line\nsecond line\r\nthird\tline")
+
+        calls = [call.args for call in tmux.call_args_list]
+        literal = [c[-1] for c in calls if c[:5] == ("send-keys", "-t", "a2t-test", "-l", "--")]
+        submits = [c for c in calls if c == ("send-keys", "-t", "a2t-test", "Enter")]
+        self.assertEqual(literal, ["first line second line third\tline"])
+        self.assertEqual(len(submits), 1)
 
     def test_allowed_agent_pane_allows_injection(self):
         calls = []
@@ -83,6 +106,50 @@ class TmuxSessionSendKeysTests(unittest.TestCase):
             self._bare(("codex",))._send_keys("hello")
 
         self.assertIn(("send-keys", "-t", "a2t-test", "Enter"), calls)
+
+    def test_full_path_expected_agent_allows_basename_match(self):
+        with patch.object(session, "_pane_value", return_value="/opt/homebrew/bin/codex"):
+            ok, detail = session._agent_alive("a2t-test", ("/Users/me/.local/bin/codex",))
+
+        self.assertTrue(ok)
+        self.assertIn("codex", detail)
+
+    def test_python_wrapper_that_mentions_expected_agent_allows_injection(self):
+        calls = []
+        processes = [
+            (100, 1, "/bin/zsh", "zsh"),
+            (101, 100, "/usr/bin/python3", "python3 /opt/wrappers/run_agent.py --agent codex"),
+        ]
+
+        def tmux(*args, **kwargs):
+            calls.append(args)
+            return self._cp(args)
+
+        with patch.object(session, "_pane_value", return_value="python3"), \
+             patch.object(session, "_pane_processes", return_value=processes), \
+             patch.object(session, "_tmux", side_effect=tmux), \
+             patch.object(session.time, "sleep"):
+            self._bare(("codex",))._send_keys("hello")
+
+        self.assertIn(("send-keys", "-t", "a2t-test", "Enter"), calls)
+
+    def test_pane_without_agent_child_blocks_injection_even_when_not_shell(self):
+        calls = []
+        processes = [(100, 1, "/usr/bin/vim", "vim README.md")]
+
+        def tmux(*args, **kwargs):
+            calls.append(args)
+            return self._cp(args)
+
+        with patch.object(session, "_pane_value", return_value="vim"), \
+             patch.object(session, "_pane_processes", return_value=processes), \
+             patch.object(session, "_tmux", side_effect=tmux), \
+             patch.object(session.time, "sleep"):
+            with self.assertRaises(SessionError):
+                self._bare(("codex",))._send_keys("echo pwned")
+
+        send_calls = [c for c in calls if c and c[0] == "send-keys"]
+        self.assertEqual(send_calls, [])
 
     def test_shell_leader_with_full_path_claude_child_allows_injection(self):
         calls = []

@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from agent2telegram.config import Config, ConfigError, load, save
+from agent2telegram.config import Config, ConfigError, load, mark_secret_from_file, save
 
 
 class ConfigTests(unittest.TestCase):
@@ -47,6 +47,28 @@ class ConfigTests(unittest.TestCase):
     def test_malformed_token_invalid(self):
         with self.assertRaises(ConfigError):
             Config(agent="codex", token="no-colon", allowed_user_ids=[]).validate()
+
+    def test_allowed_user_ids_must_be_real_integers_not_bools(self):
+        with self.assertRaises(ConfigError):
+            Config(agent="codex", token="1:2", allowed_user_ids=[True]).validate()
+        with self.assertRaises(ConfigError):
+            Config(agent="codex", token="1:2", allowed_user_ids=["7"]).validate()
+
+    def test_timeouts_must_be_positive_integers(self):
+        bad = [
+            Config(agent="codex", token="1:2", allowed_user_ids=[1], agent_timeout=0),
+            Config(agent="codex", token="1:2", allowed_user_ids=[1], agent_timeout=True),
+            Config(agent="codex", token="1:2", allowed_user_ids=[1], poll_timeout=0),
+            Config(agent="codex", token="1:2", allowed_user_ids=[1], poll_timeout=True),
+        ]
+        for cfg in bad:
+            with self.subTest(cfg=cfg):
+                with self.assertRaises(ConfigError):
+                    cfg.validate()
+
+    def test_unknown_mode_is_invalid(self):
+        with self.assertRaises(ConfigError):
+            Config(agent="codex", token="1:2", allowed_user_ids=[1], mode="webhook").validate()
 
     def test_redacted_masks_token(self):
         cfg = Config(agent="codex", token="123456:supersecret", allowed_user_ids=[1])
@@ -98,6 +120,16 @@ class ConfigTests(unittest.TestCase):
         data = json.loads(self.path.read_text("utf-8"))
         self.assertEqual(data["token"], "111:fromfile")
         self.assertEqual(data["elevenlabs_api_key"], "file-elevenlabs-key")
+
+    def test_mark_secret_from_file_persists_user_entered_secret(self):
+        cfg = Config(agent="codex", token="111:fromfile", allowed_user_ids=[1])
+        cfg.elevenlabs_api_key = "new-file-backed-key"
+        mark_secret_from_file(cfg, "elevenlabs_api_key")
+
+        save(cfg, self.path)
+
+        data = json.loads(self.path.read_text("utf-8"))
+        self.assertEqual(data["elevenlabs_api_key"], "new-file-backed-key")
 
     def test_missing_file_raises(self):
         with self.assertRaises(ConfigError):

@@ -60,10 +60,25 @@ class Config:
             raise ConfigError("Missing 'agent' (choose: claude-code, codex, generic).")
         if not self.token or _TOKEN_HINT not in self.token:
             raise ConfigError("Missing or malformed Telegram bot token (expected '<id>:<secret>').")
-        if not isinstance(self.allowed_user_ids, list) or not all(isinstance(i, int) for i in self.allowed_user_ids):
+        if (
+            not isinstance(self.allowed_user_ids, list)
+            or not all(isinstance(i, int) and not isinstance(i, bool) for i in self.allowed_user_ids)
+        ):
             raise ConfigError("'allowed_user_ids' must be a list of integers.")
-        if self.agent_timeout <= 0:
+        if (
+            not isinstance(self.agent_timeout, int)
+            or isinstance(self.agent_timeout, bool)
+            or self.agent_timeout <= 0
+        ):
             raise ConfigError("'agent_timeout' must be positive.")
+        if (
+            not isinstance(self.poll_timeout, int)
+            or isinstance(self.poll_timeout, bool)
+            or self.poll_timeout <= 0
+        ):
+            raise ConfigError("'poll_timeout' must be positive.")
+        if self.mode not in ("oneshot", "attach", "stream"):
+            raise ConfigError("'mode' must be one of: oneshot, attach, stream.")
 
     def redacted(self) -> dict:
         """A copy safe to print/log: the token is masked."""

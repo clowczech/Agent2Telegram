@@ -1,11 +1,18 @@
 """Tests for attach-mode inbound handling."""
+import json
 import tempfile
 import threading
 import unittest
 from pathlib import Path
 
+from agent2telegram import attach as attach_mod
 from agent2telegram import stt
-from agent2telegram.attach import AttachBridge, MAX_AUDIO_BYTES, MAX_INBOUND_PROMPT_CHARS
+from agent2telegram.attach import (
+    AttachBridge,
+    MAX_AUDIO_BYTES,
+    MAX_INBOUND_PROMPT_CHARS,
+    PROCESSED_UPDATE_LEDGER_LIMIT,
+)
 from agent2telegram.config import Config
 
 
@@ -98,6 +105,22 @@ def _voice(*, update_id=1, message_id=10, size=None):
             "from": {"id": 7},
             "message_id": message_id,
             "voice": media,
+        },
+    }
+
+
+def _document(*, update_id=1, message_id=10, size=None, name="report.pdf"):
+    doc = {"file_id": "doc1", "file_name": name}
+    if size is not None:
+        doc["file_size"] = size
+    return {
+        "update_id": update_id,
+        "message": {
+            "chat": {"id": 7},
+            "from": {"id": 7},
+            "message_id": message_id,
+            "caption": "see attached",
+            "document": doc,
         },
     }
 
@@ -222,6 +245,26 @@ class AttachInboundTests(unittest.TestCase):
         self.assertEqual(len(b.tg.sent), 1)
         self.assertIn("Voice/audio limit is 25 MB", b.tg.sent[0][1])
 
+    def test_downloaded_audio_over_limit_is_rejected_before_stt(self):
+        b = _bridge()
+        b.cfg.elevenlabs_api_key = "fake-key"
+        b.tg.download = lambda file_path, timeout=120: b"x" * 6
+        original_limit = attach_mod.MAX_AUDIO_BYTES
+        original_transcribe = stt.transcribe
+        stt_calls = []
+        attach_mod.MAX_AUDIO_BYTES = 5
+        stt.transcribe = lambda *_a, **_kw: stt_calls.append(True) or "should not run"
+        try:
+            b._handle(_voice(size=5))
+        finally:
+            attach_mod.MAX_AUDIO_BYTES = original_limit
+            stt.transcribe = original_transcribe
+
+        self.assertEqual(b._session.injected, [])
+        self.assertEqual(stt_calls, [])
+        self.assertEqual(len(b.tg.sent), 1)
+        self.assertIn("Voice/audio limit is 25 MB", b.tg.sent[0][1])
+
     def test_too_long_stt_prompt_is_rejected(self):
         b = _bridge()
         b.cfg.elevenlabs_api_key = "fake-key"
@@ -236,6 +279,31 @@ class AttachInboundTests(unittest.TestCase):
         self.assertEqual(b._session.injected, [])
         self.assertEqual(len(b.tg.sent), 1)
         self.assertIn("too long after processing", b.tg.sent[0][1])
+
+    def test_unauthorized_message_is_refused_and_not_injected(self):
+        b = _bridge()
+        upd = _message("steal secrets")
+        upd["message"]["from"]["id"] = 999
+
+        b._handle(upd)
+
+        self.assertEqual(b._session.injected, [])
+        self.assertEqual(len(b.tg.sent), 1)
+        self.assertIn("Not authorized", b.tg.sent[0][1])
+
+    def test_control_chars_in_caption_reach_session_as_data_not_commands(self):
+        b = _bridge()
+        b._handle({
+            "update_id": 1,
+            "message": {
+                "chat": {"id": 7},
+                "from": {"id": 7},
+                "message_id": 10,
+                "caption": "look\x00\nnow\tplease\x85!",
+            },
+        })
+
+        self.assertEqual(b._session.injected, ["look\x00\nnow\tplease\x85!"])
 
 
 class AttachOffsetPersistenceTests(unittest.TestCase):
@@ -267,6 +335,67 @@ class AttachOffsetPersistenceTests(unittest.TestCase):
 
             self.assertEqual(offset, 11)
             self.assertEqual(restarted._session.injected, [])
+
+    def test_malformed_update_id_is_skipped_without_worker_submission(self):
+        with tempfile.TemporaryDirectory() as d:
+            b = _bridge(d)
+
+            offset = b._handle_update_once({"message": _message("bad")["message"]}, 5)
+
+            self.assertEqual(offset, 5)
+            self.assertEqual(b._session.injected, [])
+            self.assertFalse(hasattr(b, "_inbound_queue"))
+
+    def test_corrupt_offset_file_falls_back_to_zero(self):
+        with tempfile.TemporaryDirectory() as d:
+            b = _bridge(d)
+            b._offset_file.parent.mkdir(parents=True, exist_ok=True)
+            b._offset_file.write_text("{not json", "utf-8")
+
+            self.assertEqual(b._load_offset(), 0)
+
+    def test_corrupt_processed_updates_file_is_ignored(self):
+        with tempfile.TemporaryDirectory() as d:
+            state = Path(d)
+            (state / "processed_updates").write_text("{not json", "utf-8")
+
+            b = _bridge(d)
+
+            self.assertEqual(b._processed_update_ids, set())
+            self.assertEqual(list(b._processed_update_order), [])
+
+    def test_processed_update_ledger_dedups_invalid_values_and_trims(self):
+        with tempfile.TemporaryDirectory() as d:
+            b = _bridge(d)
+            values = ["bad", None, 1, "1"] + list(range(2, PROCESSED_UPDATE_LEDGER_LIMIT + 7))
+            b._processed_updates_file.parent.mkdir(parents=True, exist_ok=True)
+            b._processed_updates_file.write_text(json.dumps({"update_ids": values}), "utf-8")
+
+            reloaded = _bridge(d)
+
+            self.assertEqual(len(reloaded._processed_update_order), PROCESSED_UPDATE_LEDGER_LIMIT)
+            self.assertEqual(len(reloaded._processed_update_ids), PROCESSED_UPDATE_LEDGER_LIMIT)
+            self.assertNotIn(1, reloaded._processed_update_ids)
+            self.assertIn(PROCESSED_UPDATE_LEDGER_LIMIT + 6, reloaded._processed_update_ids)
+
+    def test_outbound_queue_corruption_is_ignored(self):
+        with tempfile.TemporaryDirectory() as d:
+            b = _bridge()
+            b._queue_path = Path(d) / "queue.jsonl"
+            b._queue_path.write_text('{"text": "ok"}\n{bad json\n', "utf-8")
+
+            self.assertEqual(b._load_queue(), [])
+
+    def test_document_over_bot_api_limit_is_rejected_before_download(self):
+        b = _bridge()
+
+        b._handle(_document(size=21 * 1024 * 1024))
+
+        self.assertEqual(b.tg.file_paths, [])
+        self.assertEqual(b.tg.downloads, [])
+        self.assertEqual(b._session.injected, [])
+        self.assertEqual(len(b.tg.sent), 1)
+        self.assertIn("20 MB", b.tg.sent[0][1])
 
 
 if __name__ == "__main__":

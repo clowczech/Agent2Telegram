@@ -78,7 +78,12 @@ class Bridge:
                 self._stop.wait(3)
                 continue
             for upd in updates:
-                offset = max(offset, upd["update_id"] + 1)
+                try:
+                    update_id = int(upd["update_id"])
+                except (KeyError, TypeError, ValueError):
+                    log.warning("skipping malformed Telegram update without a valid update_id: %r", upd)
+                    continue
+                offset = max(offset, update_id + 1)
                 try:
                     self._dispatch(upd)
                 except Exception as e:
@@ -232,6 +237,8 @@ class Bridge:
             if user_id in self._allowed:
                 self._reset_chat(chat_id)
                 self.tg.send_message(chat_id, "🔄 Fresh conversation started.")
+            else:
+                self.tg.send_message(chat_id, "⛔ You're not authorized to use this bot.")
             return True
         return False  # not a known command → treat as a normal prompt
 

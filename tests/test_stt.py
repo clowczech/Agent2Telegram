@@ -106,6 +106,72 @@ class STTTests(unittest.TestCase):
         self.assertEqual(sleeps, [])
         self.assertIn("HTTP 401", str(ctx.exception))
 
+    def test_bad_request_is_not_retried(self):
+        err = urllib.error.HTTPError(
+            stt.ELEVENLABS_URL, 400, "Bad Request", {}, io.BytesIO(b"")
+        )
+        op = _SequenceOpener([err, {"text": "should not happen"}])
+        sleeps = []
+
+        with self.assertRaises(stt.STTError) as ctx:
+            stt.transcribe_elevenlabs(
+                b"audio",
+                api_key="k",
+                opener=op,
+                retry_backoffs=(1.0, 3.0),
+                sleeper=sleeps.append,
+            )
+
+        self.assertEqual(op.calls, 1)
+        self.assertEqual(sleeps, [])
+        self.assertIn("HTTP 400", str(ctx.exception))
+
+    def test_retries_5xx_then_succeeds(self):
+        err = urllib.error.HTTPError(
+            stt.ELEVENLABS_URL, 502, "Bad Gateway", {}, io.BytesIO(b"")
+        )
+        op = _SequenceOpener([err, {"text": "after 5xx retry"}])
+        sleeps = []
+
+        out = stt.transcribe_elevenlabs(
+            b"audio",
+            api_key="k",
+            opener=op,
+            retry_backoffs=(0.1, 0.2),
+            sleeper=sleeps.append,
+        )
+
+        self.assertEqual(out, "after 5xx retry")
+        self.assertEqual(op.calls, 2)
+        self.assertEqual(sleeps, [0.1])
+
+    def test_exhausted_5xx_retries_reports_attempt_count(self):
+        err1 = urllib.error.HTTPError(
+            stt.ELEVENLABS_URL, 503, "Unavailable", {}, io.BytesIO(b"")
+        )
+        err2 = urllib.error.HTTPError(
+            stt.ELEVENLABS_URL, 503, "Unavailable", {}, io.BytesIO(b"")
+        )
+        err3 = urllib.error.HTTPError(
+            stt.ELEVENLABS_URL, 503, "Unavailable", {}, io.BytesIO(b"")
+        )
+        op = _SequenceOpener([err1, err2, err3])
+        sleeps = []
+
+        with self.assertRaises(stt.STTError) as ctx:
+            stt.transcribe_elevenlabs(
+                b"audio",
+                api_key="k",
+                opener=op,
+                retry_backoffs=(0.1, 0.2),
+                sleeper=sleeps.append,
+            )
+
+        self.assertEqual(op.calls, 3)
+        self.assertEqual(sleeps, [0.1, 0.2])
+        self.assertIn("after 3 attempts", str(ctx.exception))
+        self.assertIn("HTTP 503", str(ctx.exception))
+
 
 if __name__ == "__main__":
     unittest.main()

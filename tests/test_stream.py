@@ -31,6 +31,11 @@ class _FakeClient:
         self.deleted.append((chat_id, message_id))
 
 
+class _DeleteFailClient(_FakeClient):
+    def delete_message(self, chat_id, message_id):
+        raise RuntimeError("delete failed")
+
+
 def _bridge(tmpdir, client=None):
     b = object.__new__(StreamBridge)
     b.cfg = Config(agent="codex", token="1:2", allowed_user_ids=[7], mode="stream")
@@ -80,6 +85,17 @@ class StreamBridgeTests(unittest.TestCase):
 
             self.assertFalse(b._turn_active.is_set())
 
+    def test_finish_turn_survives_status_delete_failure(self):
+        with tempfile.TemporaryDirectory() as d:
+            b = _bridge(d, _DeleteFailClient())
+            b._status = {"mid": 123, "shown": "tool"}
+            b._turn_active.set()
+
+            b._finish_turn()
+
+            self.assertFalse(b._turn_active.is_set())
+            self.assertEqual(b._status, {"mid": None, "shown": ""})
+
     def test_stream_send_marks_ledger_only_after_confirmed_send(self):
         with tempfile.TemporaryDirectory() as d:
             client = _FakeClient()
@@ -115,6 +131,30 @@ class StreamBridgeTests(unittest.TestCase):
             self.assertEqual(client.sent, [(7, "retry me")])
             self.assertIn("msg-retry", b._sent_keys)
             self.assertEqual(b._sent_path.read_text("utf-8"), "msg-retry\n")
+            self.assertEqual(b._pending_send, [])
+
+    def test_flush_pending_stops_on_failure_without_marking_later_items(self):
+        with tempfile.TemporaryDirectory() as d:
+            client = _FakeClient(fail_times=1)
+            b = _bridge(d, client)
+            b._pending_send = [
+                {"text": "first", "key": "first-key"},
+                {"text": "second", "key": "second-key"},
+            ]
+            b._persist_queue()
+
+            b._flush_pending()
+
+            self.assertEqual(client.sent, [])
+            self.assertNotIn("first-key", b._sent_keys)
+            self.assertNotIn("second-key", b._sent_keys)
+            self.assertEqual([item["key"] for item in b._pending_send], ["first-key", "second-key"])
+
+            b._flush_pending()
+
+            self.assertEqual(client.sent, [(7, "first"), (7, "second")])
+            self.assertIn("first-key", b._sent_keys)
+            self.assertIn("second-key", b._sent_keys)
             self.assertEqual(b._pending_send, [])
 
 
