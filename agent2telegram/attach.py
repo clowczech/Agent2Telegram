@@ -735,7 +735,8 @@ class AttachBridge:
             return True
         self.cfg.elevenlabs_api_key = key
         try:
-            from .config import save
+            from .config import mark_secret_from_file, save
+            mark_secret_from_file(self.cfg, "elevenlabs_api_key")
             save(self.cfg)                       # persisted 0600 to the active config path
         except Exception as e:
             log.error("setkey: could not persist config: %s", e)

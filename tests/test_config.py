@@ -1,4 +1,5 @@
 """Tests for config load/save/validation."""
+import json
 import os
 import stat
 import tempfile
@@ -12,10 +13,20 @@ class ConfigTests(unittest.TestCase):
     def setUp(self):
         self.dir = tempfile.TemporaryDirectory()
         self.path = Path(self.dir.name) / "config.json"
+        self._env = {
+            "TELEGRAM_BOT_TOKEN": os.environ.get("TELEGRAM_BOT_TOKEN"),
+            "ELEVENLABS_API_KEY": os.environ.get("ELEVENLABS_API_KEY"),
+        }
+        for name in self._env:
+            os.environ.pop(name, None)
 
     def tearDown(self):
         self.dir.cleanup()
-        os.environ.pop("TELEGRAM_BOT_TOKEN", None)
+        for name, value in self._env.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
 
     def test_roundtrip(self):
         cfg = Config(agent="codex", token="123:secret", allowed_user_ids=[7])
@@ -45,6 +56,48 @@ class ConfigTests(unittest.TestCase):
         save(Config(agent="codex", token="111:fromfile", allowed_user_ids=[1]), self.path)
         os.environ["TELEGRAM_BOT_TOKEN"] = "999:fromenv"
         self.assertEqual(load(self.path).token, "999:fromenv")
+
+    def test_env_secrets_are_not_persisted_on_save(self):
+        self.path.write_text(
+            json.dumps({"agent": "codex", "allowed_user_ids": [1]}),
+            "utf-8",
+        )
+        os.environ["TELEGRAM_BOT_TOKEN"] = "999:fromenv"
+        os.environ["ELEVENLABS_API_KEY"] = "env-elevenlabs-key"
+
+        cfg = load(self.path)
+        cfg.bot_username = "agent2telegram_bot"
+        save(cfg, self.path)
+
+        text = self.path.read_text("utf-8")
+        data = json.loads(text)
+        self.assertNotIn("token", data)
+        self.assertNotIn("elevenlabs_api_key", data)
+        self.assertNotIn("999:fromenv", text)
+        self.assertNotIn("env-elevenlabs-key", text)
+
+    def test_file_secrets_are_preserved_when_env_overrides_runtime(self):
+        save(
+            Config(
+                agent="codex",
+                token="111:fromfile",
+                allowed_user_ids=[1],
+                elevenlabs_api_key="file-elevenlabs-key",
+            ),
+            self.path,
+        )
+        os.environ["TELEGRAM_BOT_TOKEN"] = "999:fromenv"
+        os.environ["ELEVENLABS_API_KEY"] = "env-elevenlabs-key"
+
+        cfg = load(self.path)
+        self.assertEqual(cfg.token, "999:fromenv")
+        self.assertEqual(cfg.elevenlabs_api_key, "env-elevenlabs-key")
+        cfg.bot_username = "agent2telegram_bot"
+        save(cfg, self.path)
+
+        data = json.loads(self.path.read_text("utf-8"))
+        self.assertEqual(data["token"], "111:fromfile")
+        self.assertEqual(data["elevenlabs_api_key"], "file-elevenlabs-key")
 
     def test_missing_file_raises(self):
         with self.assertRaises(ConfigError):

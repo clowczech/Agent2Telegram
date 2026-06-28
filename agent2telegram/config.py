@@ -18,6 +18,12 @@ DEFAULT_PATH = Path.home() / ".config" / "agent2telegram" / "config.json"
 #: Telegram bot tokens look like ``123456789:AA...`` — used only for a friendly
 #: early error, never as real validation (Telegram is the source of truth).
 _TOKEN_HINT = ":"
+_SECRET_ENVS = {
+    "token": "TELEGRAM_BOT_TOKEN",
+    "elevenlabs_api_key": "ELEVENLABS_API_KEY",
+}
+_SOURCE_ENV = "env"
+_SOURCE_FILE = "file"
 
 
 class ConfigError(Exception):
@@ -88,15 +94,51 @@ def load(path: Path | None = None) -> Config:
         raw = json.loads(p.read_text("utf-8"))
     except json.JSONDecodeError as e:
         raise ConfigError(f"Config at {p} is not valid JSON: {e}") from e
-    # Secrets may also come from the environment, keeping them out of the file entirely.
-    if env_token := os.environ.get("TELEGRAM_BOT_TOKEN"):
-        raw["token"] = env_token
-    if env_key := os.environ.get("ELEVENLABS_API_KEY"):
-        raw["elevenlabs_api_key"] = env_key
+    secret_sources = {}
+    file_secret_values = {}
+    for name, env_name in _SECRET_ENVS.items():
+        if name in raw:
+            secret_sources[name] = _SOURCE_FILE
+            file_secret_values[name] = raw[name]
+        if env_value := os.environ.get(env_name):
+            # Runtime may use env-provided secrets, but save() must not spill them to disk.
+            secret_sources[name] = _SOURCE_ENV
+            raw[name] = env_value
     known = {f for f in Config.__dataclass_fields__}
     cfg = Config(**{k: v for k, v in raw.items() if k in known})
+    _set_secret_metadata(cfg, secret_sources, file_secret_values)
     cfg.validate()
     return cfg
+
+
+def _set_secret_metadata(cfg: Config, sources: dict, file_values: dict) -> None:
+    cfg._secret_sources = dict(sources)
+    cfg._secret_file_values = dict(file_values)
+
+
+def mark_secret_from_file(cfg: Config, name: str) -> None:
+    """Mark a user-entered secret as file-backed so save() may persist it."""
+    if name not in _SECRET_ENVS:
+        raise ValueError(f"unknown secret field: {name}")
+    sources = dict(getattr(cfg, "_secret_sources", {}))
+    file_values = dict(getattr(cfg, "_secret_file_values", {}))
+    sources[name] = _SOURCE_FILE
+    file_values[name] = getattr(cfg, name)
+    _set_secret_metadata(cfg, sources, file_values)
+
+
+def _as_persisted_dict(cfg: Config) -> dict:
+    data = asdict(cfg)
+    sources = getattr(cfg, "_secret_sources", {})
+    file_values = getattr(cfg, "_secret_file_values", {})
+    for name in _SECRET_ENVS:
+        if sources.get(name) != _SOURCE_ENV:
+            continue
+        if name in file_values:
+            data[name] = file_values[name]
+        else:
+            data.pop(name, None)
+    return data
 
 
 def save(cfg: Config, path: Path | None = None) -> Path:
@@ -110,7 +152,7 @@ def save(cfg: Config, path: Path | None = None) -> Path:
         pass
     # Write atomically, then lock down permissions — the file contains a secret.
     tmp = p.with_suffix(p.suffix + ".tmp")
-    tmp.write_text(json.dumps(asdict(cfg), indent=2, ensure_ascii=False), "utf-8")
+    tmp.write_text(json.dumps(_as_persisted_dict(cfg), indent=2, ensure_ascii=False), "utf-8")
     os.chmod(tmp, stat.S_IRUSR | stat.S_IWUSR)   # 0600
     os.replace(tmp, p)
     return p

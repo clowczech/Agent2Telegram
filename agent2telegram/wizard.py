@@ -455,7 +455,7 @@ def set_elevenlabs(config: str | None = None) -> int:
     import os
     if config:
         os.environ["AGENT2TELEGRAM_CONFIG"] = config
-    from .config import load, save, ConfigError
+    from .config import load, mark_secret_from_file, save, ConfigError
     try:
         cfg = load()
     except ConfigError as e:
@@ -467,6 +467,7 @@ def set_elevenlabs(config: str | None = None) -> int:
         print("Nothing entered — aborted.")
         return 1
     cfg.elevenlabs_api_key = key
+    mark_secret_from_file(cfg, "elevenlabs_api_key")
     path = save(cfg)
     print(f"  ✓ Saved to {path} (permissions 0600).")
     # One ElevenLabs account = one key for ALL bots. Apply it to every bridge config in the dir
@@ -483,6 +484,7 @@ def set_elevenlabs(config: str | None = None) -> int:
             continue
         if other.elevenlabs_api_key != key:
             other.elevenlabs_api_key = key
+            mark_secret_from_file(other, "elevenlabs_api_key")
             save(other, p)
             others += 1
     if others:
