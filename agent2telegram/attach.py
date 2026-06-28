@@ -41,6 +41,11 @@ IDLE_DONE = 90.0
 #: under that window so a turn never shows a gap, even right after a sent message clears it.
 TYPING_INTERVAL = 1.5
 
+# Turn-end backstop: transcript writes can lag the turn-end signal by a fraction of a second
+# (especially after a reset/reconnect), so give the final assistant text a short chance to land.
+BACKSTOP_RETRY_ATTEMPTS = 5
+BACKSTOP_RETRY_DELAY = 0.35
+
 #: Codex only: hold the first scraped tool bubble until the turn's intro text has been forwarded
 #: (agents usually say what they'll do, THEN call the tool). The scraper is live but the Codex
 #: transcript text lags, so without this the bubble jumps ahead of the intro line. After this
@@ -129,6 +134,8 @@ def _expected_agent_commands(cfg: Config) -> list[str]:
 
 
 class AttachBridge:
+    _turn_end_backstop_enabled = True
+
     def __init__(self, cfg: Config, *, client: TelegramClient | None = None) -> None:
         if not cfg.tmux_session:
             raise ValueError("attach mode requires 'tmux_session' in config")
@@ -886,6 +893,48 @@ class AttachBridge:
                 continue
         return last
 
+    def _wait_backstop_retry(self) -> None:
+        stop = getattr(self, "_stop", None)
+        if stop is not None:
+            stop.wait(BACKSTOP_RETRY_DELAY)
+        else:
+            time.sleep(BACKSTOP_RETRY_DELAY)
+
+    def _retry_last_assistant_text(self) -> str | None:
+        last = self._last_assistant_text()
+        if last and last.strip():
+            return last
+        for attempt in range(BACKSTOP_RETRY_ATTEMPTS):
+            if self._turn_text_sent:
+                return None
+            try:
+                self._drain_transcript()
+            except Exception as e:
+                log.debug("turn-end backstop transcript drain failed: %s", e)
+            if self._turn_text_sent:
+                return None
+            last = self._last_assistant_text()
+            if last and last.strip():
+                return last
+            if attempt != BACKSTOP_RETRY_ATTEMPTS - 1:
+                self._wait_backstop_retry()
+        return None
+
+    def _consume_signal_text(self) -> str | None:
+        signal = getattr(self, "_signal", None)
+        if not signal or not signal.exists():
+            return None
+        try:
+            answer = signal.read_text("utf-8").strip()
+            signal.unlink()
+        except OSError:
+            return None
+        return answer or None
+
+    def _has_turn_end_backstop_source(self) -> bool:
+        return (getattr(self, "_transcript", None) is not None
+                or getattr(self, "_signal", None) is not None)
+
     def _finish_turn(self) -> None:
         """Drop the technical bubble and stop the typing indicator at the real end of a turn."""
         self._status_clear()
@@ -895,12 +944,29 @@ class AttachBridge:
         # or interim forwarding missed it), deliver the final assistant message now. The
         # `_turn_text_sent` guard means this only fires when truly nothing was sent (no double-send),
         # and _send_final sets it True so a second _finish_turn won't re-fire.
-        if was_active and self._turn_from_tg and not self._turn_text_sent and self._owner_chat is not None:
-            last = self._last_assistant_text()
-            out = self._strip_marker(last) if last else ""
-            if out:
+        if (was_active and self._turn_from_tg and not self._turn_text_sent
+                and self._owner_chat is not None
+                and getattr(self, "_turn_end_backstop_enabled", True)):
+            source = "transcript"
+            out = ""
+            if self._has_turn_end_backstop_source():
+                last = self._retry_last_assistant_text()
+                out = self._strip_marker(last) if last else ""
+                if not out and not self._turn_text_sent:
+                    source = "signal"
+                    answer = self._consume_signal_text()
+                    out = self._strip_marker(answer) if answer else ""
+            if out and not self._turn_text_sent:
                 self._send_final(out)
-                log.info("TURN END backstop → forwarded final answer %r", out[:30])
+                log.info("TURN END backstop → forwarded final answer from %s %r",
+                         source, out[:30])
+            elif not self._turn_text_sent:
+                dur = time.monotonic() - self._turn_started
+                log.error("TURN END backstop: Telegram turn ended without an answer; "
+                          "dur=%.1fs typing_count=%d transcript_configured=%s "
+                          "signal_configured=%s",
+                          dur, self._typing_count, getattr(self, "_transcript", None) is not None,
+                          getattr(self, "_signal", None) is not None)
         self._turn_active.clear()
         self._pending_turn_end = False
         self._consume_turn_end()
@@ -1005,12 +1071,8 @@ class AttachBridge:
             pass
 
     def _drain_signal(self) -> None:
-        if not self._signal or not self._signal.exists():
-            return
-        try:
-            answer = self._signal.read_text("utf-8").strip()
-            self._signal.unlink()
-        except OSError:
+        answer = self._consume_signal_text()
+        if not answer:
             return
         if answer and self._owner_chat is not None:
             self._status_clear()                         # final message → drop the technical bubble

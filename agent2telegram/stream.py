@@ -54,6 +54,7 @@ def _stream_tool_summary(item: dict) -> str:
 class StreamBridge(AttachBridge):
     """Codex via ``codex exec --json``. Reuses AttachBridge's Telegram side; replaces the
     transcript-tailing source with a live subprocess event stream."""
+    _turn_end_backstop_enabled = False
 
     @staticmethod
     def _codex_bin() -> str:
