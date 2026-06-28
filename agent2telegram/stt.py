@@ -9,6 +9,9 @@ from __future__ import annotations
 
 import json
 import logging
+import socket
+import time
+import urllib.error
 import urllib.request
 import uuid
 
@@ -16,10 +19,22 @@ log = logging.getLogger("agent2telegram.stt")
 
 ELEVENLABS_URL = "https://api.elevenlabs.io/v1/speech-to-text"
 MODEL_ID = "scribe_v1"
+TRANSIENT_BACKOFFS = (1.0, 3.0)
 
 
 class STTError(Exception):
     pass
+
+
+def _describe_error(err: BaseException) -> str:
+    if isinstance(err, urllib.error.HTTPError):
+        msg = getattr(err, "reason", None) or getattr(err, "msg", "") or ""
+        return f"HTTP {err.code}: {msg}".strip()
+    return str(err) or err.__class__.__name__
+
+
+def _is_retryable_http(err: urllib.error.HTTPError) -> bool:
+    return 500 <= err.code <= 599
 
 
 def _multipart(fields: dict[str, str], filename: str, audio: bytes,
@@ -40,7 +55,9 @@ def _multipart(fields: dict[str, str], filename: str, audio: bytes,
 
 
 def transcribe_elevenlabs(audio: bytes, *, api_key: str, filename: str = "voice.ogg",
-                          opener=None, timeout: float = 120) -> str:
+                          opener=None, timeout: float = 120,
+                          retry_backoffs: tuple[float, ...] = TRANSIENT_BACKOFFS,
+                          sleeper=time.sleep) -> str:
     """Transcribe *audio* bytes with ElevenLabs Scribe. Returns the recognized text."""
     if not api_key:
         raise STTError("no ElevenLabs API key configured")
@@ -56,11 +73,38 @@ def transcribe_elevenlabs(audio: bytes, *, api_key: str, filename: str = "voice.
         method="POST",
     )
     op = opener or urllib.request.build_opener()
-    try:
-        with op.open(req, timeout=timeout) as resp:
-            payload = json.loads(resp.read().decode("utf-8"))
-    except Exception as e:
-        raise STTError(f"ElevenLabs request failed: {e}") from e
+    attempts = len(retry_backoffs) + 1
+    for attempt in range(attempts):
+        try:
+            with op.open(req, timeout=timeout) as resp:
+                payload = json.loads(resp.read().decode("utf-8"))
+            break
+        except urllib.error.HTTPError as e:
+            retryable = _is_retryable_http(e)
+            if not retryable or attempt == attempts - 1:
+                detail = _describe_error(e)
+                if retryable and attempts > 1:
+                    raise STTError(
+                        f"ElevenLabs request failed after {attempt + 1} attempts: {detail}"
+                    ) from e
+                raise STTError(f"ElevenLabs request failed: {detail}") from e
+            detail = _describe_error(e)
+        except (urllib.error.URLError, TimeoutError, ConnectionError, socket.timeout) as e:
+            if attempt == attempts - 1:
+                raise STTError(
+                    f"ElevenLabs request failed after {attempt + 1} attempts: {_describe_error(e)}"
+                ) from e
+            detail = _describe_error(e)
+        except Exception as e:
+            raise STTError(f"ElevenLabs request failed: {_describe_error(e)}") from e
+
+        backoff = retry_backoffs[attempt]
+        # ElevenLabs STT occasionally drops long uploads; retry only transient failures.
+        log.warning("ElevenLabs STT transient failure (%d/%d): %s; retrying in %.1fs",
+                    attempt + 1, attempts, detail, backoff)
+        sleeper(backoff)
+    else:  # pragma: no cover - for type-checkers; the loop always returns or raises
+        raise STTError("ElevenLabs request failed")
     text = (payload.get("text") or "").strip()
     if not text:
         raise STTError("transcription returned no text")

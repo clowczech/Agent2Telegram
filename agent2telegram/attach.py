@@ -14,18 +14,21 @@ This keeps the agent's full session (context, persona, tools) and adds Telegram 
 """
 from __future__ import annotations
 
+from collections import deque
 import glob
 import html
 import json
 import logging
+import queue
 import subprocess
 import threading
 import time
 from pathlib import Path
 
+from . import adapters
 from . import readers
-from .config import Config
-from .session import TmuxSession
+from .config import Config, _state_dir
+from .session import SessionError, TmuxSession
 from .telegram import TelegramClient
 
 log = logging.getLogger("agent2telegram.attach")
@@ -43,6 +46,15 @@ TYPING_INTERVAL = 1.5
 #: transcript text lags, so without this the bubble jumps ahead of the intro line. After this
 #: grace we show bubbles anyway, since some turns call a tool with no intro text.
 TUI_BUBBLE_GRACE = 3.0
+
+# Short disk ledger for Telegram update_ids already accepted by attach mode. Offset persistence is
+# the primary protection; this catches stale replays if a crash lands in the small ACK window.
+PROCESSED_UPDATE_LEDGER_LIMIT = 500
+# Keep slow media downloads/STT from becoming a resource sink. Telegram voice notes are normally
+# tiny; 25 MB still leaves room for long clips while bounding download + STT work.
+MAX_AUDIO_BYTES = 25 * 1024 * 1024
+# Final prompt guard after text, captions, downloaded-file notes, or STT results are combined.
+MAX_INBOUND_PROMPT_CHARS = 12_000
 
 #: Registered with Telegram (setMyCommands) so typing "/" shows the command autocomplete menu.
 BOT_COMMANDS = [
@@ -89,6 +101,33 @@ def _extract_tui_tools(pane: str) -> list:
     return out
 
 
+def _expected_agent_commands(cfg: Config) -> list[str]:
+    """Commands that are allowed to own the tmux pane before we send keys into it."""
+    commands: list[str] = []
+    cls = adapters.REGISTRY.get(cfg.agent)
+    if cls is not None:
+        commands.extend(cls.tui_launch()[:1])
+        if cls.binary:
+            commands.append(cls.binary)
+    if cfg.command:
+        commands.append(cfg.command[0])
+    if cfg.continue_command:
+        commands.append(cfg.continue_command[0])
+
+    seen = set()
+    out = []
+    for command in commands:
+        name = Path(str(command)).name
+        if name and name not in seen:
+            seen.add(name)
+            out.append(name)
+    if not out:
+        raise ValueError(
+            "attach mode cannot verify the tmux pane: configure an agent command to allow"
+        )
+    return out
+
+
 class AttachBridge:
     def __init__(self, cfg: Config, *, client: TelegramClient | None = None) -> None:
         if not cfg.tmux_session:
@@ -121,9 +160,13 @@ class AttachBridge:
         # the newest one (and re-detect if the session restarts). Claude Code uses a fixed path.
         self._transcript = self._resolve_transcript()
         self._last_resolve = 0.0
+        expected_agent_commands = _expected_agent_commands(cfg)
         self._session = TmuxSession([], name=cfg.tmux_session, cwd=Path.home(),
-                                    origin_prefix=cfg.origin_prefix, boot_wait=0)
+                                    origin_prefix=cfg.origin_prefix, boot_wait=0,
+                                    expected_agent_commands=expected_agent_commands)
         self._stop = threading.Event()
+        self._init_inbound_worker_state()
+        self._init_update_state()
         # Persisted ledger of already-forwarded message uuids — survives restarts/crashes/reboots
         # so resuming an interrupted turn never re-sends what was already delivered.
         self._sent_path = Path.home() / ".config" / "agent2telegram" / "attach_sent.txt"
@@ -145,6 +188,7 @@ class AttachBridge:
         self._typing_count = 0                       # diagnostics: typing actions in current turn
         self._turn_started = 0.0                     # diagnostics: monotonic ts of turn start
         self._max_gap = 0.0                          # diagnostics: largest gap between typing actions
+        self._last_pane_warning = 0.0                # throttle unsafe-pane owner alerts
         # Persist the bubble's message_id so a restart/crash mid-turn can delete the orphan it
         # would otherwise leave behind in the chat.
         self._status_path = (self._signal.parent / "status_bubble") if self._signal else None
@@ -360,6 +404,113 @@ class AttachBridge:
         except OSError:
             pass
 
+    # ---- inbound update persistence -----------------------------------------
+    def _init_update_state(self) -> None:
+        self._offset_file = _state_dir() / "offset"
+        self._processed_updates_file = _state_dir() / "processed_updates"
+        self._processed_update_ids, self._processed_update_order = self._read_processed_updates()
+
+    def _ensure_update_state(self) -> None:
+        # StreamBridge reuses this inbound loop but builds its state without calling our __init__.
+        if not hasattr(self, "_offset_file"):
+            self._offset_file = _state_dir() / "offset"
+        if not hasattr(self, "_processed_updates_file"):
+            self._processed_updates_file = _state_dir() / "processed_updates"
+        if not hasattr(self, "_processed_update_ids") or not hasattr(self, "_processed_update_order"):
+            self._processed_update_ids, self._processed_update_order = self._read_processed_updates()
+
+    def _load_offset(self) -> int:
+        self._ensure_update_state()
+        try:
+            return int(json.loads(self._offset_file.read_text("utf-8"))["offset"])
+        except Exception:
+            return 0
+
+    def _save_offset(self, offset: int) -> None:
+        self._ensure_update_state()
+        try:
+            self._offset_file.parent.mkdir(parents=True, exist_ok=True)
+            tmp = self._offset_file.parent / (self._offset_file.name + ".tmp")
+            tmp.write_text(json.dumps({"offset": int(offset)}), encoding="utf-8")
+            tmp.replace(self._offset_file)
+        except OSError as e:
+            log.warning("could not persist attach offset: %s", e)
+
+    def _read_processed_updates(self) -> tuple[set[int], deque[int]]:
+        ids: set[int] = set()
+        order: deque[int] = deque()
+        try:
+            raw = json.loads(self._processed_updates_file.read_text("utf-8")).get("update_ids", [])
+        except Exception:
+            raw = []
+        for value in raw[-PROCESSED_UPDATE_LEDGER_LIMIT:]:
+            try:
+                update_id = int(value)
+            except (TypeError, ValueError):
+                continue
+            if update_id not in ids:
+                ids.add(update_id)
+                order.append(update_id)
+        return ids, order
+
+    def _persist_processed_updates(self) -> None:
+        self._ensure_update_state()
+        try:
+            self._processed_updates_file.parent.mkdir(parents=True, exist_ok=True)
+            tmp = self._processed_updates_file.parent / (self._processed_updates_file.name + ".tmp")
+            data = {"update_ids": list(self._processed_update_order)}
+            tmp.write_text(json.dumps(data), encoding="utf-8")
+            tmp.replace(self._processed_updates_file)
+        except OSError as e:
+            log.warning("could not persist processed updates: %s", e)
+
+    def _mark_update_processed(self, update_id: int | None) -> None:
+        if update_id is None:
+            return
+        self._ensure_update_state()
+        try:
+            update_id = int(update_id)
+        except (TypeError, ValueError):
+            return
+        if update_id in self._processed_update_ids:
+            return
+        self._processed_update_ids.add(update_id)
+        self._processed_update_order.append(update_id)
+        while len(self._processed_update_order) > PROCESSED_UPDATE_LEDGER_LIMIT:
+            old = self._processed_update_order.popleft()
+            self._processed_update_ids.discard(old)
+        self._persist_processed_updates()
+
+    def _update_was_processed(self, update_id: int | None) -> bool:
+        if update_id is None:
+            return False
+        self._ensure_update_state()
+        try:
+            return int(update_id) in self._processed_update_ids
+        except (TypeError, ValueError):
+            return False
+
+    def _handle_update_once(self, upd: dict, offset: int) -> int:
+        raw_id = upd.get("update_id")
+        try:
+            update_id = int(raw_id)
+        except (TypeError, ValueError):
+            log.warning("skipping malformed Telegram update without a valid update_id: %r", upd)
+            return offset
+        next_offset = max(offset, update_id + 1) if update_id is not None else offset
+        if update_id is not None and update_id < offset:
+            return offset
+        if self._update_was_processed(update_id):
+            self._save_offset(next_offset)
+            return next_offset
+
+        # Telegram only confirms an update when the next getUpdates call uses a higher offset.
+        # Persist our offset before accepting work so a local restart cannot replay the same prompt.
+        self._save_offset(next_offset)
+        self._submit_inbound_update(upd)
+        self._mark_update_processed(update_id)
+        return next_offset
+
     # ---- durable outbound delivery (never drop a reply) --------------------
     def _load_queue(self) -> list:
         if self._queue_path is None or not self._queue_path.exists():
@@ -387,11 +538,14 @@ class AttachBridge:
         except OSError:
             pass
 
-    def _enqueue(self, text: str, key: str | None) -> None:
-        self._pending_send.append({"text": text, "key": key})
+    def _enqueue(self, text: str, key: str | None, *, turn_text: bool = True) -> None:
+        item = {"text": text, "key": key}
+        if not turn_text:
+            item["turn_text"] = False
+        self._pending_send.append(item)
         self._persist_queue()
 
-    def _send_final(self, text: str, key: str | None = None) -> None:
+    def _send_final(self, text: str, key: str | None = None, *, turn_text: bool = True) -> None:
         """Forward one reply RELIABLY. Marks the dedup ledger only AFTER a confirmed send; on any
         send failure the reply is queued to disk and the outbound loop keeps retrying until Telegram
         confirms. Order is preserved: if anything is already queued, this appends behind it."""
@@ -400,17 +554,18 @@ class AttachBridge:
         if key and key in self._sent_keys:
             return
         if self._pending_send:                       # something already waiting → keep FIFO order
-            self._enqueue(text, key)
+            self._enqueue(text, key, turn_text=turn_text)
             return
         try:
             self.tg.send_message(self._owner_chat, text)
         except Exception as e:                        # network reset, 5xx after retries, etc.
             log.warning("forward failed → queued for re-delivery: %s", e)
-            self._enqueue(text, key)
+            self._enqueue(text, key, turn_text=turn_text)
             return
         if key:
             self._mark_sent(key)
-        self._turn_text_sent = True
+        if turn_text:
+            self._turn_text_sent = True
         log.info("FWD (send) %r", text[:30])
 
     def _flush_pending(self) -> None:
@@ -427,12 +582,58 @@ class AttachBridge:
             self._persist_queue()
             if item.get("key"):
                 self._mark_sent(item["key"])
-            self._turn_text_sent = True
+            if item.get("turn_text", True):
+                self._turn_text_sent = True
             log.info("FWD (re-delivered) %r", str(item.get("text", ""))[:30])
 
     # ---- inbound (Telegram → session) -------------------------------------
+    def _init_inbound_worker_state(self) -> None:
+        self._inbound_queue = queue.Queue()
+        self._inbound_worker_started = False
+        self._inbound_worker_lock = threading.Lock()
+
+    def _ensure_inbound_worker_state(self) -> None:
+        # StreamBridge and focused tests may construct the object without AttachBridge.__init__.
+        if not hasattr(self, "_inbound_queue"):
+            self._inbound_queue = queue.Queue()
+        if not hasattr(self, "_inbound_worker_started"):
+            self._inbound_worker_started = False
+        if not hasattr(self, "_inbound_worker_lock"):
+            self._inbound_worker_lock = threading.Lock()
+
+    def _start_inbound_worker(self) -> None:
+        self._ensure_inbound_worker_state()
+        with self._inbound_worker_lock:
+            if self._inbound_worker_started:
+                return
+            threading.Thread(target=self._inbound_worker_loop, daemon=True).start()
+            self._inbound_worker_started = True
+
+    def _submit_inbound_update(self, upd: dict) -> None:
+        self._start_inbound_worker()
+        self._inbound_queue.put(upd)
+
+    def _inbound_worker_loop(self) -> None:
+        """Process accepted Telegram updates FIFO outside the long-poll thread.
+
+        Media download and STT retries can take minutes; keeping them here prevents one slow voice
+        note from blocking getUpdates while preserving message order for the owner.
+        """
+        while not self._stop.is_set() or not self._inbound_queue.empty():
+            try:
+                upd = self._inbound_queue.get(timeout=0.2)
+            except queue.Empty:
+                continue
+            try:
+                self._handle(upd)
+            except Exception as e:
+                log.exception("inbound worker error: %s", e)
+            finally:
+                self._inbound_queue.task_done()
+
     def _inbound_loop(self) -> None:
-        offset = 0
+        self._start_inbound_worker()
+        offset = self._load_offset()
         allowed_updates = json.dumps(["message", "edited_message", "message_reaction"])
         while not self._stop.is_set():
             try:
@@ -447,9 +648,8 @@ class AttachBridge:
                 self._stop.wait(3)
                 continue
             for upd in updates:
-                offset = max(offset, upd["update_id"] + 1)
                 try:
-                    self._handle(upd)
+                    offset = self._handle_update_once(upd, offset)
                 except Exception as e:
                     log.exception("inbound error: %s", e)
 
@@ -462,6 +662,7 @@ class AttachBridge:
             emojis = "".join(r.get("emoji", "") for r in mr.get("new_reaction", [])
                              if r.get("type") == "emoji")
             if emojis:
+                self._begin_turn()
                 self._inject(f"{emojis} reacted {emojis} to your message #{mr.get('message_id')} "
                              f"— quick feedback; no need to reply unless relevant.")
             return
@@ -484,11 +685,29 @@ class AttachBridge:
             if self._handle_command(text0, chat_id, msg.get("message_id")):
                 return
 
-        # Light "typing…" from the very first moment — including the voice-transcription /
-        # file-download window (seconds), so the indicator never has a gap at the start.
+        text = (msg.get("text") or msg.get("caption") or "").strip()
+        if msg.get("voice") or msg.get("audio"):
+            text = self._transcribe(msg.get("voice") or msg.get("audio"), chat_id) or text
+            if not text:
+                return
+        elif msg.get("photo") or msg.get("document"):
+            note = self._download_note(msg, chat_id)
+            if not note:
+                return
+            text = f"{text}\n{note}".strip()
+        if text:
+            text = self._limit_inbound_prompt(text, chat_id)
+            if not text:
+                return
+            self._begin_turn()
+            self._inject(text)
+
+    def _begin_turn(self) -> None:
+        # Light "typing…" from the actual injection point.
         self._consume_turn_end()                 # drop any stale end-marker from a prior turn
         now = time.monotonic()
         self._turn_active.set()
+        self._turn_from_tg = True
         self._last_activity = now
         self._turn_started = now
         self._typing_count = 1
@@ -498,7 +717,7 @@ class AttachBridge:
         # Seed the TUI dedup with tool lines ALREADY on screen from previous turns, so the
         # scraper only emits calls that appear DURING this turn — otherwise stale lines still
         # visible in the pane get re-sent as bubbles under the new turn.
-        if self.cfg.agent == "codex":
+        if self.cfg.agent == "codex" and hasattr(self, "_session"):
             try:
                 self._tui_seen = set(_extract_tui_tools(self._session._capture()))
             except Exception:
@@ -508,25 +727,39 @@ class AttachBridge:
         self.tg.send_chat_action(self._owner_chat, "typing")   # instant, don't wait for the loop
         log.info("TURN START t=%.2f", time.time())
 
-        text = (msg.get("text") or msg.get("caption") or "").strip()
-        if msg.get("voice") or msg.get("audio"):
-            text = self._transcribe(msg.get("voice") or msg.get("audio"), chat_id) or text
-            if not text:
-                return
-        elif msg.get("photo") or msg.get("document"):
-            note = self._download_note(msg, chat_id)
-            text = f"{text}\n{note}".strip() if note else text
-        if text:
-            self._inject(text)
-
-    def _inject(self, text: str) -> None:
+    def _inject(self, text: str) -> bool:
         self._turn_active.set()
         self._last_activity = time.monotonic()   # keep typing lit from the very start
         try:
             self._session.inject(text)
+            return True
+        except SessionError as e:
+            log.error("inject failed: %s", e)
+            self._turn_active.clear()
+            if "refusing to inject" in str(e):
+                self._notify_unsafe_pane(str(e))
+            return False
         except Exception as e:
             log.error("inject failed: %s", e)
             self._turn_active.clear()
+            return False
+
+    def _notify_unsafe_pane(self, reason: str) -> None:
+        if not self._owner_chat:
+            return
+        now = time.monotonic()
+        if now - self._last_pane_warning < 60:
+            return
+        self._last_pane_warning = now
+        try:
+            self.tg.send_message(
+                self._owner_chat,
+                "⚠️ Agent2Telegram blocked a Telegram message because the configured tmux "
+                f"session no longer appears to be running the expected agent.\n\n{reason}\n\n"
+                "Restart the agent in that tmux pane, then resend the message.",
+            )
+        except Exception as e:
+            log.warning("unsafe-pane owner notification failed: %s", e)
 
     def _handle_command(self, text: str, chat_id: int, message_id: int | None = None) -> bool:
         """Answer a bridge-level slash command. Returns True if handled (don't forward to agent)."""
@@ -568,7 +801,8 @@ class AttachBridge:
             return True
         self.cfg.elevenlabs_api_key = key
         try:
-            from .config import save
+            from .config import mark_secret_from_file, save
+            mark_secret_from_file(self.cfg, "elevenlabs_api_key")
             save(self.cfg)                       # persisted 0600 to the active config path
         except Exception as e:
             log.error("setkey: could not persist config: %s", e)
@@ -580,14 +814,14 @@ class AttachBridge:
         return True
 
     def _typing_loop(self) -> None:
-        """Dedicated thread: assert "typing…" every TYPING_INTERVAL while a turn is active.
+        """Dedicated thread: assert "typing…" every TYPING_INTERVAL during Telegram turns.
 
         It runs independently of the outbound/send loop, so a flood-control sleep in the send path
         (which happens during a burst of messages) can never starve the indicator — that was the
         cause of mid-turn typing gaps. It stops the instant the turn ends (turn_active cleared), so
         no action fires after the final message and typing stops with it (bar Telegram's ~5s decay)."""
         while not self._stop.is_set():
-            if self._turn_active.is_set() and self._owner_chat is not None:
+            if self._turn_active.is_set() and self._turn_from_tg and self._owner_chat is not None:
                 now = time.monotonic()
                 gap = now - self._last_typing
                 if gap > self._max_gap:
@@ -736,7 +970,10 @@ class AttachBridge:
 
     def _status_clear(self) -> None:
         if self._status["mid"] is not None and self._owner_chat is not None:
-            self.tg.delete_message(self._owner_chat, self._status["mid"])
+            try:
+                self.tg.delete_message(self._owner_chat, self._status["mid"])
+            except Exception as e:
+                log.warning("status bubble cleanup failed: %s", e)
         self._status = {"mid": None, "shown": ""}
         self._seen_tools.clear()
         self._persist_status(None)
@@ -806,8 +1043,8 @@ class AttachBridge:
                 continue
             for ev in self._reader.parse(rec):
                 self._handle_event(ev)
-        # Any new transcript content during a Telegram turn = the agent is still working;
-        # refresh activity so the idle fallback doesn't fire prematurely.
+        # Any new transcript content during a Telegram turn = the agent is still working; refresh
+        # activity so the idle fallback doesn't fire prematurely.
         if self._turn_from_tg:
             self._last_activity = time.monotonic()
 
@@ -831,7 +1068,9 @@ class AttachBridge:
             self._turn_from_tg = ev.text.lstrip().startswith(self._origins)
             return
         if ev.kind == "turn_start":
-            return                              # inbound already lit typing; nothing else to do
+            if not self._turn_active.is_set():
+                self._turn_from_tg = False
+            return                              # local TUI turns do not make Telegram inbound busy
         if ev.kind == "turn_end":
             self._pending_turn_end = True       # outbound loop finishes the turn after this drain
             return
@@ -854,6 +1093,25 @@ class AttachBridge:
                 self._status_push(ev.text)
 
     # ---- media helpers (reuse the same download/STT as one-shot mode) ------
+    def _reject_audio_too_large(self, chat_id: int, size: int | None) -> None:
+        mb = (int(size or 0) + 1024 * 1024 - 1) // (1024 * 1024)
+        self.tg.send_message(
+            chat_id,
+            f"🎤 That audio is ~{mb} MB. Voice/audio limit is 25 MB — "
+            "please send a shorter clip or write it as text.",
+        )
+
+    def _limit_inbound_prompt(self, text: str, chat_id: int) -> str | None:
+        if len(text) <= MAX_INBOUND_PROMPT_CHARS:
+            return text
+        self.tg.send_message(
+            chat_id,
+            f"⚠️ That message is too long after processing ({len(text)} characters). "
+            f"Please shorten it to {MAX_INBOUND_PROMPT_CHARS} characters or less.",
+        )
+        log.warning("inbound prompt too long: %d characters", len(text))
+        return None
+
     def _transcribe(self, media: dict, chat_id: int) -> str | None:
         from . import stt
         if not self.cfg.elevenlabs_api_key:
@@ -862,13 +1120,30 @@ class AttachBridge:
                 "`/setkey <your-key>` (I'll delete the message right after) — then resend the voice note.")
             return None
         try:
+            size = int(media.get("file_size") or 0)
+        except (TypeError, ValueError):
+            size = 0
+        if size > MAX_AUDIO_BYTES:
+            self._reject_audio_too_large(chat_id, size)
+            log.warning("voice/audio too large for STT: %s bytes", size)
+            return None
+        try:
             fp = self.tg.get_file_path(media["file_id"])
             audio = self.tg.download(fp)
+            if len(audio) > MAX_AUDIO_BYTES:
+                self._reject_audio_too_large(chat_id, len(audio))
+                log.warning("downloaded voice/audio too large for STT: %s bytes", len(audio))
+                return None
             return stt.transcribe(audio, api_key=self.cfg.elevenlabs_api_key,
                                   filename=Path(fp).name or "voice.ogg")
         except Exception as e:
             log.error("transcription failed: %s", e)
-            self.tg.send_message(chat_id, f"⚠️ Couldn't transcribe: {e}")
+            # This is an inbound voice-note failure, not agent output for the current turn.
+            self._send_final(
+                f"🎤 Přepis hlasovky se nepovedl ({e}). "
+                "Pošli prosím znovu nebo napiš textem.",
+                turn_text=False,
+            )
             return None
 
     def _download_note(self, msg: dict, chat_id: int) -> str:
