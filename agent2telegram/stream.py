@@ -86,6 +86,10 @@ class StreamBridge(AttachBridge):
             self._sent_keys: set = set(self._sent_path.read_text("utf-8").split())
         except OSError:
             self._sent_keys = set()
+        # Stream mode has no attach signal directory, but it still needs durable retry state:
+        # a Telegram send failure must leave the final text queued until a later confirmed send.
+        self._queue_path = Path.home() / ".config" / "agent2telegram" / "stream_outbound_queue.jsonl"
+        self._pending_send: list = self._load_queue()
         self._turn_active = threading.Event()
         self._init_inbound_queue()
         self._turn_from_tg = True                  # every turn here is Telegram-originated
@@ -98,6 +102,7 @@ class StreamBridge(AttachBridge):
         self._max_gap = 0.0
         self._status_path = (self._signal.parent / "stream_status_bubble") if self._signal else None
         self._seen_tools: set = set()
+        self._tui_seen: set = set()
         self._turn_text_sent = False
         self._pending_turn_end = False
         # ---- Codex stream specifics ----
@@ -112,8 +117,18 @@ class StreamBridge(AttachBridge):
         from .attach import BOT_COMMANDS
         self.tg.set_my_commands(BOT_COMMANDS)
         self._cleanup_orphan_status()
+        threading.Thread(target=self._delivery_loop, daemon=True).start()
         threading.Thread(target=self._typing_loop, daemon=True).start()
         self._inbound_loop()
+
+    def _delivery_loop(self) -> None:
+        """Retry stream-mode sends that failed after Codex already emitted the final text."""
+        while not self._stop.is_set():
+            try:
+                self._flush_pending()
+            except Exception as e:
+                log.error("delivery retry error: %s", e)
+            self._stop.wait(0.4)
 
     # ---- inbound (override): spawn codex exec --json instead of tmux send-keys ----
     def _inject(self, text: str) -> None:
@@ -179,9 +194,10 @@ class StreamBridge(AttachBridge):
             out = self._strip_marker(item.get("text", ""))
             key = item.get("id") or out[:40]
             if out and self._owner_chat is not None and key not in self._sent_keys:
-                self._mark_sent(key)
                 self._status_clear()               # progress/final text → drop the tool bubble
-                self.tg.send_message(self._owner_chat, out)
+                # Reuse AttachBridge's durable path: mark the ledger only after Telegram confirms;
+                # on failure the message is persisted and retried instead of being lost.
+                self._send_final(out, key=key)
         elif t == "item.started" and itype and itype != "agent_message":
             iid = item.get("id")
             if iid and iid not in self._seen_tools:
