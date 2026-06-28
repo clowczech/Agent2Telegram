@@ -2,6 +2,7 @@
 import threading
 import unittest
 
+from agent2telegram import stt
 from agent2telegram.attach import AttachBridge
 from agent2telegram.config import Config
 
@@ -20,6 +21,12 @@ class _FakeClient:
 
     def delete_message(self, chat_id, message_id):
         self.deleted.append((chat_id, message_id))
+
+    def get_file_path(self, file_id):
+        return f"voice/{file_id}.ogg"
+
+    def download(self, file_path, timeout=120):
+        return b"VOICE-BYTES"
 
 
 class _FakeSession:
@@ -46,6 +53,18 @@ def _message(text, *, update_id=1, message_id=10, edited=False):
     }
 
 
+def _voice(*, update_id=1, message_id=10):
+    return {
+        "update_id": update_id,
+        "message": {
+            "chat": {"id": 7},
+            "from": {"id": 7},
+            "message_id": message_id,
+            "voice": {"file_id": "v1"},
+        },
+    }
+
+
 def _bridge():
     b = object.__new__(AttachBridge)
     b.cfg = Config(agent="generic", token="1:2", allowed_user_ids=[7], tmux_session="a2t")
@@ -54,6 +73,9 @@ def _bridge():
     b._owner_chat = 7
     b._turn_end = None
     b._session = _FakeSession()
+    b._sent_keys = set()
+    b._queue_path = None
+    b._pending_send = []
     b._turn_active = threading.Event()
     b._init_inbound_queue()
     b._turn_from_tg = False
@@ -122,6 +144,28 @@ class AttachInboundQueueTests(unittest.TestCase):
         b._finish_turn()
 
         self.assertEqual(b._session.injected, ["new text"])
+
+    def test_voice_transcription_failure_notifies_owner(self):
+        b = _bridge()
+        b.cfg.elevenlabs_api_key = "fake-key"
+        b._turn_text_sent = False
+        orig = stt.transcribe
+
+        def fail_transcribe(*_a, **_kw):
+            raise stt.STTError("ElevenLabs request failed after 3 attempts: timed out")
+
+        stt.transcribe = fail_transcribe
+        try:
+            b._handle(_voice())
+        finally:
+            stt.transcribe = orig
+
+        self.assertEqual(b._session.injected, [])
+        self.assertEqual(len(b.tg.sent), 1)
+        self.assertEqual(b.tg.sent[0][0], 7)
+        self.assertIn("Přepis hlasovky se nepovedl", b.tg.sent[0][1])
+        self.assertIn("timed out", b.tg.sent[0][1])
+        self.assertFalse(b._turn_text_sent)
 
 
 if __name__ == "__main__":

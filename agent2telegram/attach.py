@@ -426,11 +426,14 @@ class AttachBridge:
         except OSError:
             pass
 
-    def _enqueue(self, text: str, key: str | None) -> None:
-        self._pending_send.append({"text": text, "key": key})
+    def _enqueue(self, text: str, key: str | None, *, turn_text: bool = True) -> None:
+        item = {"text": text, "key": key}
+        if not turn_text:
+            item["turn_text"] = False
+        self._pending_send.append(item)
         self._persist_queue()
 
-    def _send_final(self, text: str, key: str | None = None) -> None:
+    def _send_final(self, text: str, key: str | None = None, *, turn_text: bool = True) -> None:
         """Forward one reply RELIABLY. Marks the dedup ledger only AFTER a confirmed send; on any
         send failure the reply is queued to disk and the outbound loop keeps retrying until Telegram
         confirms. Order is preserved: if anything is already queued, this appends behind it."""
@@ -439,17 +442,18 @@ class AttachBridge:
         if key and key in self._sent_keys:
             return
         if self._pending_send:                       # something already waiting → keep FIFO order
-            self._enqueue(text, key)
+            self._enqueue(text, key, turn_text=turn_text)
             return
         try:
             self.tg.send_message(self._owner_chat, text)
         except Exception as e:                        # network reset, 5xx after retries, etc.
             log.warning("forward failed → queued for re-delivery: %s", e)
-            self._enqueue(text, key)
+            self._enqueue(text, key, turn_text=turn_text)
             return
         if key:
             self._mark_sent(key)
-        self._turn_text_sent = True
+        if turn_text:
+            self._turn_text_sent = True
         log.info("FWD (send) %r", text[:30])
 
     def _flush_pending(self) -> None:
@@ -466,7 +470,8 @@ class AttachBridge:
             self._persist_queue()
             if item.get("key"):
                 self._mark_sent(item["key"])
-            self._turn_text_sent = True
+            if item.get("turn_text", True):
+                self._turn_text_sent = True
             log.info("FWD (re-delivered) %r", str(item.get("text", ""))[:30])
 
     # ---- inbound (Telegram → session) -------------------------------------
@@ -1043,7 +1048,12 @@ class AttachBridge:
                                   filename=Path(fp).name or "voice.ogg")
         except Exception as e:
             log.error("transcription failed: %s", e)
-            self.tg.send_message(chat_id, f"⚠️ Couldn't transcribe: {e}")
+            # This is an inbound voice-note failure, not agent output for the current turn.
+            self._send_final(
+                f"🎤 Přepis hlasovky se nepovedl ({e}). "
+                "Pošli prosím znovu nebo napiš textem.",
+                turn_text=False,
+            )
             return None
 
     def _download_note(self, msg: dict, chat_id: int) -> str:
