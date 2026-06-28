@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 
 from agent2telegram import stt
-from agent2telegram.attach import AttachBridge
+from agent2telegram.attach import AttachBridge, MAX_AUDIO_BYTES, MAX_INBOUND_PROMPT_CHARS
 from agent2telegram.config import Config
 
 
@@ -14,6 +14,8 @@ class _FakeClient:
         self.actions = []
         self.deleted = []
         self.sent = []
+        self.file_paths = []
+        self.downloads = []
 
     def send_chat_action(self, chat_id, action="typing"):
         self.actions.append((chat_id, action))
@@ -25,9 +27,11 @@ class _FakeClient:
         self.deleted.append((chat_id, message_id))
 
     def get_file_path(self, file_id):
+        self.file_paths.append(file_id)
         return f"voice/{file_id}.ogg"
 
     def download(self, file_path, timeout=120):
+        self.downloads.append(file_path)
         return b"VOICE-BYTES"
 
 
@@ -40,6 +44,22 @@ class _PollingClient(_FakeClient):
     def _call(self, method, params, timeout=None):
         self.calls.append((method, dict(params), timeout))
         self.stop_event.set()
+        return []
+
+
+class _SlowSTTPollingClient(_FakeClient):
+    def __init__(self, stop_poll):
+        super().__init__()
+        self.stop_poll = stop_poll
+        self.calls = []
+        self.second_call = threading.Event()
+
+    def _call(self, method, params, timeout=None):
+        self.calls.append((method, dict(params), timeout))
+        if len(self.calls) == 1:
+            return [_voice(update_id=1)]
+        self.second_call.set()
+        self.stop_poll.wait(2)
         return []
 
 
@@ -67,14 +87,17 @@ def _message(text, *, update_id=1, message_id=10, edited=False):
     }
 
 
-def _voice(*, update_id=1, message_id=10):
+def _voice(*, update_id=1, message_id=10, size=None):
+    media = {"file_id": "v1"}
+    if size is not None:
+        media["file_size"] = size
     return {
         "update_id": update_id,
         "message": {
             "chat": {"id": 7},
             "from": {"id": 7},
             "message_id": message_id,
-            "voice": {"file_id": "v1"},
+            "voice": media,
         },
     }
 
@@ -115,6 +138,11 @@ def _bridge(state_dir=None):
     return b
 
 
+def _wait_inbound(b):
+    if hasattr(b, "_inbound_queue"):
+        b._inbound_queue.join()
+
+
 class AttachInboundTests(unittest.TestCase):
     def test_message_during_active_turn_injects_immediately(self):
         b = _bridge()
@@ -147,6 +175,68 @@ class AttachInboundTests(unittest.TestCase):
         self.assertIn("timed out", b.tg.sent[0][1])
         self.assertFalse(b._turn_text_sent)
 
+    def test_poll_thread_does_not_block_on_slow_stt(self):
+        with tempfile.TemporaryDirectory() as d:
+            b = _bridge(d)
+            b.cfg.elevenlabs_api_key = "fake-key"
+            stop_poll = threading.Event()
+            client = _SlowSTTPollingClient(stop_poll)
+            b.tg = client
+            stt_started = threading.Event()
+            release_stt = threading.Event()
+            orig = stt.transcribe
+
+            def slow_transcribe(*_a, **_kw):
+                stt_started.set()
+                release_stt.wait(2)
+                return "voice text"
+
+            stt.transcribe = slow_transcribe
+            t = threading.Thread(target=b._inbound_loop)
+            try:
+                t.start()
+                self.assertTrue(stt_started.wait(2))
+                self.assertTrue(client.second_call.wait(0.5))
+                self.assertEqual(b._session.injected, [])
+
+                release_stt.set()
+                _wait_inbound(b)
+
+                self.assertEqual(b._session.injected, ["voice text"])
+            finally:
+                stt.transcribe = orig
+                release_stt.set()
+                b._stop.set()
+                stop_poll.set()
+                t.join(2)
+
+    def test_too_large_audio_is_rejected_before_download(self):
+        b = _bridge()
+        b.cfg.elevenlabs_api_key = "fake-key"
+
+        b._handle(_voice(size=MAX_AUDIO_BYTES + 1))
+
+        self.assertEqual(b._session.injected, [])
+        self.assertEqual(b.tg.file_paths, [])
+        self.assertEqual(b.tg.downloads, [])
+        self.assertEqual(len(b.tg.sent), 1)
+        self.assertIn("Voice/audio limit is 25 MB", b.tg.sent[0][1])
+
+    def test_too_long_stt_prompt_is_rejected(self):
+        b = _bridge()
+        b.cfg.elevenlabs_api_key = "fake-key"
+        orig = stt.transcribe
+
+        stt.transcribe = lambda *_a, **_kw: "x" * (MAX_INBOUND_PROMPT_CHARS + 1)
+        try:
+            b._handle(_voice())
+        finally:
+            stt.transcribe = orig
+
+        self.assertEqual(b._session.injected, [])
+        self.assertEqual(len(b.tg.sent), 1)
+        self.assertIn("too long after processing", b.tg.sent[0][1])
+
 
 class AttachOffsetPersistenceTests(unittest.TestCase):
     def test_inbound_loop_loads_persisted_offset(self):
@@ -165,6 +255,7 @@ class AttachOffsetPersistenceTests(unittest.TestCase):
             b = _bridge(d)
 
             offset = b._handle_update_once(_message("first", update_id=10), b._load_offset())
+            _wait_inbound(b)
 
             self.assertEqual(offset, 11)
             self.assertEqual(b._session.injected, ["first"])

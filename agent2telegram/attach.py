@@ -19,6 +19,7 @@ import glob
 import html
 import json
 import logging
+import queue
 import subprocess
 import threading
 import time
@@ -49,6 +50,11 @@ TUI_BUBBLE_GRACE = 3.0
 # Short disk ledger for Telegram update_ids already accepted by attach mode. Offset persistence is
 # the primary protection; this catches stale replays if a crash lands in the small ACK window.
 PROCESSED_UPDATE_LEDGER_LIMIT = 500
+# Keep slow media downloads/STT from becoming a resource sink. Telegram voice notes are normally
+# tiny; 25 MB still leaves room for long clips while bounding download + STT work.
+MAX_AUDIO_BYTES = 25 * 1024 * 1024
+# Final prompt guard after text, captions, downloaded-file notes, or STT results are combined.
+MAX_INBOUND_PROMPT_CHARS = 12_000
 
 #: Registered with Telegram (setMyCommands) so typing "/" shows the command autocomplete menu.
 BOT_COMMANDS = [
@@ -159,6 +165,7 @@ class AttachBridge:
                                     origin_prefix=cfg.origin_prefix, boot_wait=0,
                                     expected_agent_commands=expected_agent_commands)
         self._stop = threading.Event()
+        self._init_inbound_worker_state()
         self._init_update_state()
         # Persisted ledger of already-forwarded message uuids — survives restarts/crashes/reboots
         # so resuming an interrupted turn never re-sends what was already delivered.
@@ -497,9 +504,9 @@ class AttachBridge:
             return next_offset
 
         # Telegram only confirms an update when the next getUpdates call uses a higher offset.
-        # Persist our offset before tmux injection so a local restart cannot replay the same prompt.
+        # Persist our offset before accepting work so a local restart cannot replay the same prompt.
         self._save_offset(next_offset)
-        self._handle(upd)
+        self._submit_inbound_update(upd)
         self._mark_update_processed(update_id)
         return next_offset
 
@@ -579,7 +586,52 @@ class AttachBridge:
             log.info("FWD (re-delivered) %r", str(item.get("text", ""))[:30])
 
     # ---- inbound (Telegram → session) -------------------------------------
+    def _init_inbound_worker_state(self) -> None:
+        self._inbound_queue = queue.Queue()
+        self._inbound_worker_started = False
+        self._inbound_worker_lock = threading.Lock()
+
+    def _ensure_inbound_worker_state(self) -> None:
+        # StreamBridge and focused tests may construct the object without AttachBridge.__init__.
+        if not hasattr(self, "_inbound_queue"):
+            self._inbound_queue = queue.Queue()
+        if not hasattr(self, "_inbound_worker_started"):
+            self._inbound_worker_started = False
+        if not hasattr(self, "_inbound_worker_lock"):
+            self._inbound_worker_lock = threading.Lock()
+
+    def _start_inbound_worker(self) -> None:
+        self._ensure_inbound_worker_state()
+        with self._inbound_worker_lock:
+            if self._inbound_worker_started:
+                return
+            threading.Thread(target=self._inbound_worker_loop, daemon=True).start()
+            self._inbound_worker_started = True
+
+    def _submit_inbound_update(self, upd: dict) -> None:
+        self._start_inbound_worker()
+        self._inbound_queue.put(upd)
+
+    def _inbound_worker_loop(self) -> None:
+        """Process accepted Telegram updates FIFO outside the long-poll thread.
+
+        Media download and STT retries can take minutes; keeping them here prevents one slow voice
+        note from blocking getUpdates while preserving message order for the owner.
+        """
+        while not self._stop.is_set() or not self._inbound_queue.empty():
+            try:
+                upd = self._inbound_queue.get(timeout=0.2)
+            except queue.Empty:
+                continue
+            try:
+                self._handle(upd)
+            except Exception as e:
+                log.exception("inbound worker error: %s", e)
+            finally:
+                self._inbound_queue.task_done()
+
     def _inbound_loop(self) -> None:
+        self._start_inbound_worker()
         offset = self._load_offset()
         allowed_updates = json.dumps(["message", "edited_message", "message_reaction"])
         while not self._stop.is_set():
@@ -641,6 +693,9 @@ class AttachBridge:
             note = self._download_note(msg, chat_id)
             text = f"{text}\n{note}".strip() if note else text
         if text:
+            text = self._limit_inbound_prompt(text, chat_id)
+            if not text:
+                return
             self._begin_turn()
             self._inject(text)
 
@@ -1032,6 +1087,25 @@ class AttachBridge:
                 self._status_push(ev.text)
 
     # ---- media helpers (reuse the same download/STT as one-shot mode) ------
+    def _reject_audio_too_large(self, chat_id: int, size: int | None) -> None:
+        mb = (int(size or 0) + 1024 * 1024 - 1) // (1024 * 1024)
+        self.tg.send_message(
+            chat_id,
+            f"🎤 That audio is ~{mb} MB. Voice/audio limit is 25 MB — "
+            "please send a shorter clip or write it as text.",
+        )
+
+    def _limit_inbound_prompt(self, text: str, chat_id: int) -> str | None:
+        if len(text) <= MAX_INBOUND_PROMPT_CHARS:
+            return text
+        self.tg.send_message(
+            chat_id,
+            f"⚠️ That message is too long after processing ({len(text)} characters). "
+            f"Please shorten it to {MAX_INBOUND_PROMPT_CHARS} characters or less.",
+        )
+        log.warning("inbound prompt too long: %d characters", len(text))
+        return None
+
     def _transcribe(self, media: dict, chat_id: int) -> str | None:
         from . import stt
         if not self.cfg.elevenlabs_api_key:
@@ -1040,8 +1114,20 @@ class AttachBridge:
                 "`/setkey <your-key>` (I'll delete the message right after) — then resend the voice note.")
             return None
         try:
+            size = int(media.get("file_size") or 0)
+        except (TypeError, ValueError):
+            size = 0
+        if size > MAX_AUDIO_BYTES:
+            self._reject_audio_too_large(chat_id, size)
+            log.warning("voice/audio too large for STT: %s bytes", size)
+            return None
+        try:
             fp = self.tg.get_file_path(media["file_id"])
             audio = self.tg.download(fp)
+            if len(audio) > MAX_AUDIO_BYTES:
+                self._reject_audio_too_large(chat_id, len(audio))
+                log.warning("downloaded voice/audio too large for STT: %s bytes", len(audio))
+                return None
             return stt.transcribe(audio, api_key=self.cfg.elevenlabs_api_key,
                                   filename=Path(fp).name or "voice.ogg")
         except Exception as e:
