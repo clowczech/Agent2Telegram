@@ -1,6 +1,8 @@
 """Tests for attach-mode inbound turn queueing."""
+import tempfile
 import threading
 import unittest
+from pathlib import Path
 
 from agent2telegram import stt
 from agent2telegram.attach import AttachBridge
@@ -27,6 +29,18 @@ class _FakeClient:
 
     def download(self, file_path, timeout=120):
         return b"VOICE-BYTES"
+
+
+class _PollingClient(_FakeClient):
+    def __init__(self, stop_event):
+        super().__init__()
+        self.stop_event = stop_event
+        self.calls = []
+
+    def _call(self, method, params, timeout=None):
+        self.calls.append((method, dict(params), timeout))
+        self.stop_event.set()
+        return []
 
 
 class _FakeSession:
@@ -65,7 +79,7 @@ def _voice(*, update_id=1, message_id=10):
     }
 
 
-def _bridge():
+def _bridge(state_dir=None):
     b = object.__new__(AttachBridge)
     b.cfg = Config(agent="generic", token="1:2", allowed_user_ids=[7], tmux_session="a2t")
     b.tg = _FakeClient()
@@ -93,6 +107,12 @@ def _bridge():
     b._turn_text_sent = True
     b._pending_turn_end = False
     b._marker = "[tg]"
+    b._stop = threading.Event()
+    if state_dir is not None:
+        state = Path(state_dir)
+        b._offset_file = state / "offset"
+        b._processed_updates_file = state / "processed_updates"
+        b._processed_update_ids, b._processed_update_order = b._read_processed_updates()
     return b
 
 
@@ -166,6 +186,36 @@ class AttachInboundQueueTests(unittest.TestCase):
         self.assertIn("Přepis hlasovky se nepovedl", b.tg.sent[0][1])
         self.assertIn("timed out", b.tg.sent[0][1])
         self.assertFalse(b._turn_text_sent)
+
+
+class AttachOffsetPersistenceTests(unittest.TestCase):
+    def test_inbound_loop_loads_persisted_offset(self):
+        with tempfile.TemporaryDirectory() as d:
+            b = _bridge(d)
+            b._save_offset(42)
+            b.tg = _PollingClient(b._stop)
+
+            b._inbound_loop()
+
+            self.assertEqual(b.tg.calls[0][0], "getUpdates")
+            self.assertEqual(b.tg.calls[0][1]["offset"], 42)
+
+    def test_processed_update_is_not_reinjected_after_restart(self):
+        with tempfile.TemporaryDirectory() as d:
+            b = _bridge(d)
+
+            offset = b._handle_update_once(_message("first", update_id=10), b._load_offset())
+
+            self.assertEqual(offset, 11)
+            self.assertEqual(b._session.injected, ["first"])
+            self.assertEqual(b._load_offset(), 11)
+            b._offset_file.unlink()
+
+            restarted = _bridge(d)
+            offset = restarted._handle_update_once(_message("first", update_id=10), restarted._load_offset())
+
+            self.assertEqual(offset, 11)
+            self.assertEqual(restarted._session.injected, [])
 
 
 if __name__ == "__main__":

@@ -26,7 +26,7 @@ from pathlib import Path
 
 from . import adapters
 from . import readers
-from .config import Config
+from .config import Config, _state_dir
 from .session import SessionError, TmuxSession
 from .telegram import TelegramClient
 
@@ -45,6 +45,10 @@ TYPING_INTERVAL = 1.5
 #: transcript text lags, so without this the bubble jumps ahead of the intro line. After this
 #: grace we show bubbles anyway, since some turns call a tool with no intro text.
 TUI_BUBBLE_GRACE = 3.0
+
+# Short disk ledger for Telegram update_ids already accepted by attach mode. Offset persistence is
+# the primary protection; this catches stale replays if a crash lands in the small ACK window.
+PROCESSED_UPDATE_LEDGER_LIMIT = 500
 
 #: Registered with Telegram (setMyCommands) so typing "/" shows the command autocomplete menu.
 BOT_COMMANDS = [
@@ -155,6 +159,7 @@ class AttachBridge:
                                     origin_prefix=cfg.origin_prefix, boot_wait=0,
                                     expected_agent_commands=expected_agent_commands)
         self._stop = threading.Event()
+        self._init_update_state()
         # Persisted ledger of already-forwarded message uuids — survives restarts/crashes/reboots
         # so resuming an interrupted turn never re-sends what was already delivered.
         self._sent_path = Path.home() / ".config" / "agent2telegram" / "attach_sent.txt"
@@ -399,6 +404,112 @@ class AttachBridge:
         except OSError:
             pass
 
+    # ---- inbound update persistence -----------------------------------------
+    def _init_update_state(self) -> None:
+        self._offset_file = _state_dir() / "offset"
+        self._processed_updates_file = _state_dir() / "processed_updates"
+        self._processed_update_ids, self._processed_update_order = self._read_processed_updates()
+
+    def _ensure_update_state(self) -> None:
+        # StreamBridge reuses this inbound loop but builds its state without calling our __init__.
+        if not hasattr(self, "_offset_file"):
+            self._offset_file = _state_dir() / "offset"
+        if not hasattr(self, "_processed_updates_file"):
+            self._processed_updates_file = _state_dir() / "processed_updates"
+        if not hasattr(self, "_processed_update_ids") or not hasattr(self, "_processed_update_order"):
+            self._processed_update_ids, self._processed_update_order = self._read_processed_updates()
+
+    def _load_offset(self) -> int:
+        self._ensure_update_state()
+        try:
+            return int(json.loads(self._offset_file.read_text("utf-8"))["offset"])
+        except Exception:
+            return 0
+
+    def _save_offset(self, offset: int) -> None:
+        self._ensure_update_state()
+        try:
+            self._offset_file.parent.mkdir(parents=True, exist_ok=True)
+            tmp = self._offset_file.parent / (self._offset_file.name + ".tmp")
+            tmp.write_text(json.dumps({"offset": int(offset)}), encoding="utf-8")
+            tmp.replace(self._offset_file)
+        except OSError as e:
+            log.warning("could not persist attach offset: %s", e)
+
+    def _read_processed_updates(self) -> tuple[set[int], deque[int]]:
+        ids: set[int] = set()
+        order: deque[int] = deque()
+        try:
+            raw = json.loads(self._processed_updates_file.read_text("utf-8")).get("update_ids", [])
+        except Exception:
+            raw = []
+        for value in raw[-PROCESSED_UPDATE_LEDGER_LIMIT:]:
+            try:
+                update_id = int(value)
+            except (TypeError, ValueError):
+                continue
+            if update_id not in ids:
+                ids.add(update_id)
+                order.append(update_id)
+        return ids, order
+
+    def _persist_processed_updates(self) -> None:
+        self._ensure_update_state()
+        try:
+            self._processed_updates_file.parent.mkdir(parents=True, exist_ok=True)
+            tmp = self._processed_updates_file.parent / (self._processed_updates_file.name + ".tmp")
+            data = {"update_ids": list(self._processed_update_order)}
+            tmp.write_text(json.dumps(data), encoding="utf-8")
+            tmp.replace(self._processed_updates_file)
+        except OSError as e:
+            log.warning("could not persist processed updates: %s", e)
+
+    def _mark_update_processed(self, update_id: int | None) -> None:
+        if update_id is None:
+            return
+        self._ensure_update_state()
+        try:
+            update_id = int(update_id)
+        except (TypeError, ValueError):
+            return
+        if update_id in self._processed_update_ids:
+            return
+        self._processed_update_ids.add(update_id)
+        self._processed_update_order.append(update_id)
+        while len(self._processed_update_order) > PROCESSED_UPDATE_LEDGER_LIMIT:
+            old = self._processed_update_order.popleft()
+            self._processed_update_ids.discard(old)
+        self._persist_processed_updates()
+
+    def _update_was_processed(self, update_id: int | None) -> bool:
+        if update_id is None:
+            return False
+        self._ensure_update_state()
+        try:
+            return int(update_id) in self._processed_update_ids
+        except (TypeError, ValueError):
+            return False
+
+    def _handle_update_once(self, upd: dict, offset: int) -> int:
+        raw_id = upd.get("update_id")
+        try:
+            update_id = int(raw_id)
+        except (TypeError, ValueError):
+            update_id = None
+        next_offset = max(offset, update_id + 1) if update_id is not None else offset
+        if update_id is not None and update_id < offset:
+            return offset
+        if self._update_was_processed(update_id):
+            self._save_offset(next_offset)
+            return next_offset
+
+        # Telegram only confirms an update when the next getUpdates call uses a higher offset.
+        # Persist our offset before tmux injection so a local restart cannot replay the same prompt.
+        self._save_offset(next_offset)
+        self._handle(upd)
+        self._mark_update_processed(update_id)
+        return next_offset
+
     # ---- durable outbound delivery (never drop a reply) --------------------
     def _load_queue(self) -> list:
         if self._queue_path is None or not self._queue_path.exists():
@@ -476,7 +587,7 @@ class AttachBridge:
 
     # ---- inbound (Telegram → session) -------------------------------------
     def _inbound_loop(self) -> None:
-        offset = 0
+        offset = self._load_offset()
         allowed_updates = json.dumps(["message", "edited_message", "message_reaction"])
         while not self._stop.is_set():
             try:
@@ -491,9 +602,8 @@ class AttachBridge:
                 self._stop.wait(3)
                 continue
             for upd in updates:
-                offset = max(offset, upd["update_id"] + 1)
                 try:
-                    self._handle(upd)
+                    offset = self._handle_update_once(upd, offset)
                 except Exception as e:
                     log.exception("inbound error: %s", e)
 
