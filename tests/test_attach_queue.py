@@ -1,4 +1,4 @@
-"""Tests for attach-mode inbound turn queueing."""
+"""Tests for attach-mode inbound handling."""
 import tempfile
 import threading
 import unittest
@@ -91,7 +91,6 @@ def _bridge(state_dir=None):
     b._queue_path = None
     b._pending_send = []
     b._turn_active = threading.Event()
-    b._init_inbound_queue()
     b._turn_from_tg = False
     b._transcript = None
     b._last_activity = 0.0
@@ -116,54 +115,15 @@ def _bridge(state_dir=None):
     return b
 
 
-class AttachInboundQueueTests(unittest.TestCase):
-    def test_message_during_active_turn_waits_until_finish_turn(self):
+class AttachInboundTests(unittest.TestCase):
+    def test_message_during_active_turn_injects_immediately(self):
         b = _bridge()
         b._turn_active.set()
 
         b._handle(_message("second turn"))
 
-        self.assertEqual(b._session.injected, [])
-        self.assertEqual([item["text"] for item in b._inbound_queue], ["second turn"])
-
-        b._turn_from_tg = False
-        b._finish_turn()
-
         self.assertEqual(b._session.injected, ["second turn"])
         self.assertTrue(b._turn_active.is_set())
-        self.assertEqual(list(b._inbound_queue), [])
-
-    def test_queued_messages_are_injected_fifo_one_per_turn(self):
-        b = _bridge()
-        b._turn_active.set()
-
-        b._handle(_message("first queued", update_id=1, message_id=11))
-        b._handle(_message("second queued", update_id=2, message_id=12))
-
-        self.assertEqual(b._session.injected, [])
-
-        b._turn_from_tg = False
-        b._finish_turn()
-        self.assertEqual(b._session.injected, ["first queued"])
-        self.assertEqual([item["text"] for item in b._inbound_queue], ["second queued"])
-
-        b._finish_turn()
-        self.assertEqual(b._session.injected, ["first queued", "second queued"])
-        self.assertEqual(list(b._inbound_queue), [])
-
-    def test_edit_updates_same_queued_message_before_injection(self):
-        b = _bridge()
-        b._turn_active.set()
-
-        b._handle(_message("old text", update_id=1, message_id=11))
-        b._handle(_message("new text", update_id=2, message_id=11, edited=True))
-
-        self.assertEqual([item["text"] for item in b._inbound_queue], ["new text"])
-
-        b._turn_from_tg = False
-        b._finish_turn()
-
-        self.assertEqual(b._session.injected, ["new text"])
 
     def test_voice_transcription_failure_notifies_owner(self):
         b = _bridge()

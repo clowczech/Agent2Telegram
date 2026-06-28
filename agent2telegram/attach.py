@@ -1,8 +1,8 @@
 """Attach mode — drive an existing live agent session, the way a hand-rolled bridge does.
 
 Async model:
-  * **inbound** (main thread): poll Telegram → queue Telegram-originated input, then inject
-    exactly one prompt into the live tmux session when the prior turn is done.
+  * **inbound** (main thread): poll Telegram → inject each message into the live tmux session
+    via send-keys. No blocking wait.
   * **outbound** (background thread): tail the agent transcript and, via an agent-specific
     :mod:`reader`, forward every assistant message of Telegram-originated turns, drive a live
     one-line tool-call status bubble, and detect end-of-turn (Codex: ``task_complete`` in the
@@ -174,7 +174,6 @@ class AttachBridge:
         self._pending_send: list = self._load_queue()
         self._tpos = 0
         self._turn_active = threading.Event()
-        self._init_inbound_queue()
         self._turn_from_tg = False           # is the current transcript turn Telegram-originated?
         self._last_activity = 0.0            # monotonic ts of last transcript activity (for typing)
         self._status = {"mid": None, "shown": ""}   # live one-line tool-call status bubble
@@ -189,12 +188,6 @@ class AttachBridge:
         self._seen_tools: set = set()
         self._tui_seen: set = set()          # Codex TUI scrape: tool lines already shown this turn
         self._turn_text_sent = False         # has any text been forwarded this turn (bubble gate)
-
-    def _init_inbound_queue(self) -> None:
-        # Telegram can deliver a second update while the agent TUI is still answering. Keep those
-        # updates FIFO and inject them only after a real turn-end/prompt-ready transition.
-        self._inbound_queue: deque[dict] = deque()
-        self._inbound_lock = threading.Lock()
 
     # ---- transcript resolution --------------------------------------------
     def _codex_sessions_dir(self) -> Path:
@@ -616,17 +609,14 @@ class AttachBridge:
             emojis = "".join(r.get("emoji", "") for r in mr.get("new_reaction", [])
                              if r.get("type") == "emoji")
             if emojis:
-                self._submit_inbound(
-                    f"{emojis} reacted {emojis} to your message #{mr.get('message_id')} "
-                    f"— quick feedback; no need to reply unless relevant.",
-                    kind="reaction",
-                )
+                self._begin_turn()
+                self._inject(f"{emojis} reacted {emojis} to your message #{mr.get('message_id')} "
+                             f"— quick feedback; no need to reply unless relevant.")
             return
 
         msg = upd.get("message") or upd.get("edited_message")
         if not msg:
             return
-        is_edit = "edited_message" in upd
         user_id = msg.get("from", {}).get("id")
         chat_id = msg["chat"]["id"]
         if user_id not in self._allowed:
@@ -651,95 +641,11 @@ class AttachBridge:
             note = self._download_note(msg, chat_id)
             text = f"{text}\n{note}".strip() if note else text
         if text:
-            self._submit_inbound(
-                text,
-                kind="message",
-                queue_key=self._message_queue_key(msg),
-                replace_existing=is_edit,
-            )
-
-    def _message_queue_key(self, msg: dict) -> str | None:
-        mid = msg.get("message_id")
-        chat = msg.get("chat") or {}
-        chat_id = chat.get("id")
-        if chat_id is None or mid is None:
-            return None
-        return f"{chat_id}:{mid}"
-
-    def _coalesce_queued_inbound(self, item: dict) -> bool:
-        """Replace a queued original message with its edit before that message reaches the TUI."""
-        key = item.get("queue_key")
-        if item.get("kind") != "message" or not key or not item.get("replace_existing"):
-            return False
-        for queued in reversed(self._inbound_queue):
-            if queued.get("kind") == "message" and queued.get("queue_key") == key:
-                queued["text"] = item["text"]
-                queued["edited"] = True
-                log.info("INBOUND edit updated queued message %s", key)
-                return True
-        return False
-
-    def _submit_inbound(
-        self,
-        text: str,
-        *,
-        kind: str,
-        queue_key: str | None = None,
-        replace_existing: bool = False,
-    ) -> None:
-        """Queue or start one Telegram-originated input while preserving turn boundaries."""
-        item = {
-            "text": text,
-            "kind": kind,
-            "queue_key": queue_key,
-            "replace_existing": replace_existing,
-        }
-        start_item = None
-        with self._inbound_lock:
-            replaced = self._coalesce_queued_inbound(item)
-            if self._turn_active.is_set():
-                if not replaced:
-                    self._inbound_queue.append(item)
-                    log.info("INBOUND queued %s (%d waiting)", kind, len(self._inbound_queue))
-                return
-            if self._inbound_queue:
-                if not replaced:
-                    self._inbound_queue.append(item)
-                    log.info("INBOUND queued %s (%d waiting)", kind, len(self._inbound_queue))
-                start_item = self._inbound_queue.popleft()
-            else:
-                start_item = item
-            self._turn_active.set()              # reserve the next turn against inbound/outbound races
-        self._run_inbound_item(start_item)
-
-    def _flush_next_inbound(self) -> None:
-        start_item = None
-        with self._inbound_lock:
-            if self._turn_active.is_set() or not self._inbound_queue:
-                return
-            start_item = self._inbound_queue.popleft()
-            self._turn_active.set()              # reserve one injection; the rest stays queued
-        self._run_inbound_item(start_item)
-
-    def _requeue_inbound_front(self, item: dict) -> None:
-        with self._inbound_lock:
-            self._inbound_queue.appendleft(item)
-
-    def _run_inbound_item(self, item: dict) -> None:
-        try:
             self._begin_turn()
-            ok = self._inject(item["text"])
-        except Exception as e:
-            log.error("turn start failed: %s", e)
-            self._turn_active.clear()
-            self._requeue_inbound_front(item)
-            return
-        if ok is False:
-            self._requeue_inbound_front(item)
+            self._inject(text)
 
     def _begin_turn(self) -> None:
-        # Light "typing…" from the actual injection point. Queued updates must not reset the
-        # currently-running turn's typing/status bookkeeping.
+        # Light "typing…" from the actual injection point.
         self._consume_turn_end()                 # drop any stale end-marker from a prior turn
         now = time.monotonic()
         self._turn_active.set()
@@ -762,19 +668,6 @@ class AttachBridge:
             self._tui_seen = set()
         self.tg.send_chat_action(self._owner_chat, "typing")   # instant, don't wait for the loop
         log.info("TURN START t=%.2f", time.time())
-
-    def _note_transcript_turn_active(self) -> None:
-        """Mark a turn seen in the transcript as busy, even if it was started in the TUI."""
-        if self._turn_active.is_set():
-            return
-        now = time.monotonic()
-        self._turn_active.set()
-        self._last_activity = now
-        self._turn_started = now
-        self._typing_count = 0
-        self._max_gap = 0.0
-        self._last_typing = now
-        self._turn_text_sent = False
 
     def _inject(self, text: str) -> bool:
         self._turn_active.set()
@@ -957,7 +850,6 @@ class AttachBridge:
             log.info("TURN END t=%.2f dur=%.1fs typing_fired=%d max_gap=%.2fs",
                      time.time(), time.monotonic() - self._turn_started,
                      self._typing_count, self._max_gap)
-        self._flush_next_inbound()
 
     def _end_turn(self) -> None:
         # Claude Stop-hook path: catch anything written just before the hook fired, then finish.
@@ -984,7 +876,6 @@ class AttachBridge:
                 elif self._turn_active.is_set() and time.monotonic() - self._last_activity > IDLE_DONE:
                     self._status_clear()
                     self._turn_active.clear()
-                    self._flush_next_inbound()
                 self._beat()                  # reached only on a full, non-blocking forward cycle
             except Exception as e:
                 log.error("outbound error: %s", e)
@@ -1064,7 +955,6 @@ class AttachBridge:
             self._status_clear()                         # final message → drop the technical bubble
             self._send_final(answer)                     # reliable: queue + retry on send failure
             self._turn_active.clear()
-            self._flush_next_inbound()
 
     def _drain_transcript(self) -> None:
         if not self._transcript or not self._transcript.exists():
@@ -1092,9 +982,9 @@ class AttachBridge:
                 continue
             for ev in self._reader.parse(rec):
                 self._handle_event(ev)
-        # Any new transcript content during an active turn = the agent is still working; refresh
+        # Any new transcript content during a Telegram turn = the agent is still working; refresh
         # activity so the idle fallback doesn't fire prematurely.
-        if self._turn_active.is_set():
+        if self._turn_from_tg:
             self._last_activity = time.monotonic()
 
     def _strip_marker(self, text: str) -> str:
@@ -1114,14 +1004,12 @@ class AttachBridge:
         if ev.kind == "user":
             # Remember whether this turn came from Telegram (origin prefix) — only those are
             # forwarded; terminal-originated turns stay local.
-            self._note_transcript_turn_active()
             self._turn_from_tg = ev.text.lstrip().startswith(self._origins)
             return
         if ev.kind == "turn_start":
             if not self._turn_active.is_set():
                 self._turn_from_tg = False
-            self._note_transcript_turn_active()
-            return                              # busy state is tracked; no Telegram forwarding here
+            return                              # local TUI turns do not make Telegram inbound busy
         if ev.kind == "turn_end":
             self._pending_turn_end = True       # outbound loop finishes the turn after this drain
             return

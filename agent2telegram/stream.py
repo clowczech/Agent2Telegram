@@ -91,7 +91,6 @@ class StreamBridge(AttachBridge):
         self._queue_path = Path.home() / ".config" / "agent2telegram" / "stream_outbound_queue.jsonl"
         self._pending_send: list = self._load_queue()
         self._turn_active = threading.Event()
-        self._init_inbound_queue()
         self._turn_from_tg = True                  # every turn here is Telegram-originated
         self._transcript = None                    # _finish_turn backstop is transcript-only
         self._last_activity = 0.0

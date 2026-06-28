@@ -48,7 +48,6 @@ def _bridge(tmpdir, client=None):
     b._queue_path = Path(tmpdir) / "stream_outbound_queue.jsonl"
     b._pending_send = []
     b._turn_active = threading.Event()
-    b._init_inbound_queue()
     b._turn_from_tg = True
     b._transcript = None
     b._last_activity = 0.0
@@ -80,7 +79,6 @@ class StreamBridgeTests(unittest.TestCase):
             b._finish_turn()
 
             self.assertFalse(b._turn_active.is_set())
-            self.assertEqual(list(b._inbound_queue), [])
 
     def test_stream_send_marks_ledger_only_after_confirmed_send(self):
         with tempfile.TemporaryDirectory() as d:
