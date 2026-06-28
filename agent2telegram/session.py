@@ -34,6 +34,8 @@ _SEP_RE = re.compile(r"^[\s─━—–_=·.\-]{6,}$")
 _STATUS_RE = re.compile(r"^[✻✶✳✢✺✷*]\s")           # spinner/status, e.g. "✻ Worked for 1s"
 _BULLET_RE = re.compile(r"^\s*[⏺●○•]\s?")           # assistant output bullet
 
+MAX_TMUX_INJECTION_CHARS = 8000
+
 
 def _clean_tui(text: str) -> str:
     out = []
@@ -49,6 +51,22 @@ def _clean_tui(text: str) -> str:
             continue
         out.append(_BULLET_RE.sub("", s))
     return "\n".join(out).strip()
+
+
+def sanitize_for_tmux(text: str) -> str:
+    """Drop terminal control bytes that tmux would otherwise pass to the live TUI."""
+    out = []
+    for ch in text:
+        codepoint = ord(ch)
+        if (
+            ch not in "\n\t"
+            and (codepoint < 0x20 or codepoint == 0x7f or 0x80 <= codepoint <= 0x9f)
+        ):
+            continue
+        out.append(ch)
+        if len(out) >= MAX_TMUX_INJECTION_CHARS:
+            break
+    return "".join(out)
 
 
 class SessionError(Exception):
@@ -98,9 +116,11 @@ class TmuxSession:
 
     # ---- messaging ---------------------------------------------------------
     def _send_keys(self, text: str) -> None:
+        text = sanitize_for_tmux(text)
         text = " ".join(text.splitlines())                 # one Enter submits everything
         if self._origin:
             text = f"{self._origin}{text}"
+        text = sanitize_for_tmux(text)
         _tmux("send-keys", "-t", self.name, "C-u"); time.sleep(0.05)
         _tmux("send-keys", "-t", self.name, "-l", "--", text); time.sleep(0.15)
         _tmux("send-keys", "-t", self.name, "Enter")
