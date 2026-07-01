@@ -29,7 +29,7 @@ from . import adapters
 from . import readers
 from .config import Config, _state_dir
 from .session import SessionError, TmuxSession
-from .telegram import TelegramClient
+from .telegram import TelegramClient, TelegramError, is_network_error
 
 log = logging.getLogger("agent2telegram.attach")
 
@@ -643,6 +643,7 @@ class AttachBridge:
         offset = self._load_offset()
         allowed_updates = json.dumps(["message", "edited_message", "message_reaction"])
         transient_fails = 0
+        outage_alerted = False
         while not self._stop.is_set():
             try:
                 updates = self.tg._call(
@@ -651,23 +652,28 @@ class AttachBridge:
                      "allowed_updates": allowed_updates},
                     timeout=self.cfg.poll_timeout + 15,
                 )
-            except OSError as e:
-                # Přechodný síťový/DNS výpadek (urllib/socket → OSError, např. Errno 8
-                # "nodename nor servname provided"): bridge se sám zotaví. Nelogovat jako
-                # ERROR (spouští monitoring alert), dokud to není trvalé – retry s backoffem.
-                transient_fails += 1
-                if transient_fails >= 5:
-                    log.error("getUpdates network error (%d× v řadě, trvalý výpadek?): %s",
-                              transient_fails, e)
-                else:
-                    log.warning("getUpdates přechodná síťová chyba (%d): %s", transient_fails, e)
-                self._stop.wait(min(3 * transient_fails, 30))
-                continue
-            except Exception as e:
-                log.error("getUpdates failed: %s", e)
+            except (TelegramError, OSError) as e:
+                if is_network_error(e):
+                    # Přechodný/výpadkový síťový/DNS problém (Errno 8 "nodename nor servname",
+                    # connection reset, timeout) – bridge se sám zotaví. WARNING + backoff;
+                    # ERROR jen JEDNOU při delším výpadku, ať monitoring nealertuje na
+                    # sebe-zotavující se VPN-DNS blip.
+                    transient_fails += 1
+                    if transient_fails >= 10 and not outage_alerted:
+                        log.error("getUpdates network výpadek (%d× v řadě) trvá déle: %s",
+                                  transient_fails, e)
+                        outage_alerted = True
+                    else:
+                        log.warning("getUpdates přechodná síťová chyba (%d): %s", transient_fails, e)
+                    self._stop.wait(min(3 * transient_fails, 30))
+                    continue
+                log.error("getUpdates failed: %s", e)   # skutečná (ne-síťová) chyba
                 self._stop.wait(3)
                 continue
+            if outage_alerted:
+                log.info("getUpdates síť obnovena po %d chybách", transient_fails)
             transient_fails = 0
+            outage_alerted = False
             for upd in updates:
                 try:
                     offset = self._handle_update_once(upd, offset)

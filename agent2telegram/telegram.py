@@ -117,6 +117,17 @@ class TelegramError(Exception):
     pass
 
 
+def is_network_error(exc: BaseException) -> bool:
+    """True pro přechodný síťový/DNS problém – ať přímý (OSError/URLError/timeout,
+    včetně gaierror „nodename nor servname"/Errno 8), nebo zabalený v ``TelegramError``
+    (``__cause__``). ``json.JSONDecodeError`` = malformovaná odpověď = také přechodné.
+    Slouží k tomu, aby se sebe-zotavující se výpadky nelogovaly jako ERROR (monitoring alert)."""
+    if isinstance(exc, OSError):
+        return True
+    cause = getattr(exc, "__cause__", None)
+    return isinstance(cause, (OSError, json.JSONDecodeError))
+
+
 class TelegramClient:
     def __init__(self, token: str, *, max_retries: int = 5, opener=None) -> None:
         if not token or ":" not in token:

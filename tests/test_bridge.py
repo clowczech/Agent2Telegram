@@ -204,11 +204,15 @@ class AdversarialDispatchTests(BridgeTestBase):
             self.assertEqual(bridge.adapter.calls, [])
             self.assertEqual(client.sent, [])
 
-    def test_transient_network_error_warns_then_errors(self):
-        """Přechodný DNS/síťový výpadek getUpdates se loguje jako WARNING (nespouští
-        monitoring alert) a eskaluje na ERROR až po 5 chybách v řadě (trvalý výpadek)."""
+    def test_transient_network_outage_warns_errors_once_then_recovers(self):
+        """Síťový/DNS výpadek getUpdates (i zabalený v TelegramError, jak ho reálně vyhazuje
+        telegram.py po vyčerpání retmů) se loguje jako WARNING; ERROR jen JEDNOU při delším
+        výpadku (≥10 chyb v řadě), aby monitoring nealertoval na sebe-zotavující se VPN-DNS
+        blip; po obnově se loguje INFO a čítač se resetuje."""
         import logging as _logging
+        import urllib.error as _uerr
         from unittest.mock import patch as _patch
+        from agent2telegram.telegram import TelegramError as _TgErr
 
         class _FlakyClient(_FakeClient):
             def __init__(self, fail_times):
@@ -220,26 +224,32 @@ class AdversarialDispatchTests(BridgeTestBase):
             def get_updates(self, offset, *, timeout=50):
                 self.calls += 1
                 if self.calls <= self.fail_times:
-                    raise OSError("[Errno 8] nodename nor servname provided, or not known")
+                    # přesně jak to vyhazuje telegram.py: TelegramError s __cause__ = síťová chyba
+                    raise _TgErr("getUpdates: <urlopen error [Errno 8] nodename nor servname>") \
+                        from _uerr.URLError("[Errno 8] nodename nor servname provided, or not known")
                 if self.stop_event is not None:
                     self.stop_event.set()
                 return []
 
         with tempfile.TemporaryDirectory() as d:
-            client = _FlakyClient(fail_times=6)
+            client = _FlakyClient(fail_times=13)   # delší výpadek než threshold 10, pak obnova
             cfg = Config(agent="claude-code", token="1:2", allowed_user_ids=[7], workdir=d)
             bridge = Bridge(cfg, client=client)
             bridge.adapter = _FakeAdapter()
             bridge._offset_file = Path(d) / "offset"
             client.stop_event = bridge._stop
             with _patch.object(bridge._stop, "wait", lambda *a, **k: False), \
-                 self.assertLogs("agent2telegram.bridge", level="WARNING") as cm:
+                 self.assertLogs("agent2telegram.bridge", level="INFO") as cm:
                 bridge.run()
             gu = [r for r in cm.records if "getUpdates" in r.getMessage()]
             warns = [r for r in gu if r.levelno == _logging.WARNING]
             errors = [r for r in gu if r.levelno == _logging.ERROR]
-            self.assertGreaterEqual(len(warns), 4)   # chyby 1–4 = WARNING
-            self.assertGreaterEqual(len(errors), 1)  # 5.+ = ERROR
+            infos = [r for r in gu if r.levelno == _logging.INFO]
+            self.assertGreaterEqual(len(warns), 9)          # chyby 1–9 = WARNING
+            self.assertEqual(len(errors), 1)                # ERROR přesně jednou za výpadek
+            self.assertGreaterEqual(len(infos), 1)          # obnova = INFO
+            # síťová chyba se NIKDY neloguje starým "getUpdates failed" (= ne-síťová větev)
+            self.assertFalse(any("getUpdates failed" in r.getMessage() for r in gu))
 
 
 if __name__ == "__main__":
