@@ -204,6 +204,43 @@ class AdversarialDispatchTests(BridgeTestBase):
             self.assertEqual(bridge.adapter.calls, [])
             self.assertEqual(client.sent, [])
 
+    def test_transient_network_error_warns_then_errors(self):
+        """Přechodný DNS/síťový výpadek getUpdates se loguje jako WARNING (nespouští
+        monitoring alert) a eskaluje na ERROR až po 5 chybách v řadě (trvalý výpadek)."""
+        import logging as _logging
+        from unittest.mock import patch as _patch
+
+        class _FlakyClient(_FakeClient):
+            def __init__(self, fail_times):
+                super().__init__()
+                self.fail_times = fail_times
+                self.calls = 0
+                self.stop_event = None
+
+            def get_updates(self, offset, *, timeout=50):
+                self.calls += 1
+                if self.calls <= self.fail_times:
+                    raise OSError("[Errno 8] nodename nor servname provided, or not known")
+                if self.stop_event is not None:
+                    self.stop_event.set()
+                return []
+
+        with tempfile.TemporaryDirectory() as d:
+            client = _FlakyClient(fail_times=6)
+            cfg = Config(agent="claude-code", token="1:2", allowed_user_ids=[7], workdir=d)
+            bridge = Bridge(cfg, client=client)
+            bridge.adapter = _FakeAdapter()
+            bridge._offset_file = Path(d) / "offset"
+            client.stop_event = bridge._stop
+            with _patch.object(bridge._stop, "wait", lambda *a, **k: False), \
+                 self.assertLogs("agent2telegram.bridge", level="WARNING") as cm:
+                bridge.run()
+            gu = [r for r in cm.records if "getUpdates" in r.getMessage()]
+            warns = [r for r in gu if r.levelno == _logging.WARNING]
+            errors = [r for r in gu if r.levelno == _logging.ERROR]
+            self.assertGreaterEqual(len(warns), 4)   # chyby 1–4 = WARNING
+            self.assertGreaterEqual(len(errors), 1)  # 5.+ = ERROR
+
 
 if __name__ == "__main__":
     unittest.main()

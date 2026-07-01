@@ -70,13 +70,27 @@ class Bridge:
                         "Message the bot and check /id, then add your id to the config.")
         self._install_signal_handlers()
         offset = self._load_offset()
+        transient_fails = 0
         while not self._stop.is_set():
             try:
                 updates = self.tg.get_updates(offset, timeout=self.cfg.poll_timeout)
+            except OSError as e:
+                # Přechodný síťový/DNS výpadek (urllib/socket → OSError): bridge se sám
+                # zotaví. Nelogovat jako ERROR (spouští monitoring alert), dokud to není
+                # trvalé – retry s rostoucím backoffem.
+                transient_fails += 1
+                if transient_fails >= 5:
+                    log.error("getUpdates network error (%d× v řadě, trvalý výpadek?): %s",
+                              transient_fails, e)
+                else:
+                    log.warning("getUpdates přechodná síťová chyba (%d): %s", transient_fails, e)
+                self._stop.wait(min(3 * transient_fails, 30))
+                continue
             except Exception as e:                       # never let the loop die
                 log.error("getUpdates failed: %s", e)
                 self._stop.wait(3)
                 continue
+            transient_fails = 0
             for upd in updates:
                 try:
                     update_id = int(upd["update_id"])

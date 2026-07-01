@@ -642,6 +642,7 @@ class AttachBridge:
         self._start_inbound_worker()
         offset = self._load_offset()
         allowed_updates = json.dumps(["message", "edited_message", "message_reaction"])
+        transient_fails = 0
         while not self._stop.is_set():
             try:
                 updates = self.tg._call(
@@ -650,10 +651,23 @@ class AttachBridge:
                      "allowed_updates": allowed_updates},
                     timeout=self.cfg.poll_timeout + 15,
                 )
+            except OSError as e:
+                # Přechodný síťový/DNS výpadek (urllib/socket → OSError, např. Errno 8
+                # "nodename nor servname provided"): bridge se sám zotaví. Nelogovat jako
+                # ERROR (spouští monitoring alert), dokud to není trvalé – retry s backoffem.
+                transient_fails += 1
+                if transient_fails >= 5:
+                    log.error("getUpdates network error (%d× v řadě, trvalý výpadek?): %s",
+                              transient_fails, e)
+                else:
+                    log.warning("getUpdates přechodná síťová chyba (%d): %s", transient_fails, e)
+                self._stop.wait(min(3 * transient_fails, 30))
+                continue
             except Exception as e:
                 log.error("getUpdates failed: %s", e)
                 self._stop.wait(3)
                 continue
+            transient_fails = 0
             for upd in updates:
                 try:
                     offset = self._handle_update_once(upd, offset)
