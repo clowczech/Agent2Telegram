@@ -135,5 +135,46 @@ class OutgoingFilesTest(unittest.TestCase):
         self.assertIn(c.path_outbox(), c.allowed_outbox_dirs())
 
 
+class NotifyFilesTest(unittest.TestCase):
+    """`notify --file` je cesta pro zprávy z pozadí a cronu. Musí mít STEJNOU
+    hranici jako marker v chatu – běh na pozadí není důvěryhodnější než agent."""
+
+    def test_notify_odmitne_soubor_mimo_outbox(self) -> None:
+        from agent2telegram import __main__ as m
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "outbox"
+            out.mkdir()
+            secret = Path(tmp) / "credentials.json"
+            secret.write_text("{}", encoding="utf-8")
+            cfg = cfg_with_outbox(out)
+            cfg.allowed_user_ids = [1]
+            client = mock.Mock()
+            args = mock.Mock(message="ahoj", config=None, file=[str(secret)])
+            with mock.patch("agent2telegram.config.load", return_value=cfg), \
+                 mock.patch("agent2telegram.telegram.TelegramClient", return_value=client):
+                rc = m._cmd_notify(args)
+            self.assertEqual(rc, 1, "odmítnutí musí vrátit nenulový kód")
+            client.send_file.assert_not_called()
+            client.send_message.assert_called_once()      # text projde, soubor ne
+
+    def test_notify_posle_soubor_z_outboxu(self) -> None:
+        from agent2telegram import __main__ as m
+        with tempfile.TemporaryDirectory() as tmp:
+            out = Path(tmp) / "outbox"
+            out.mkdir()
+            f = out / "vlna.png"
+            f.write_bytes(b"x" * 50)
+            cfg = cfg_with_outbox(out)
+            cfg.allowed_user_ids = [1]
+            client = mock.Mock()
+            args = mock.Mock(message=None, config=None, file=[str(f)])
+            with mock.patch("agent2telegram.config.load", return_value=cfg), \
+                 mock.patch("agent2telegram.telegram.TelegramClient", return_value=client):
+                rc = m._cmd_notify(args)
+            self.assertEqual(rc, 0)
+            client.send_file.assert_called_once()
+            client.send_message.assert_not_called()       # bez textu se nic neposílá
+
+
 if __name__ == "__main__":
     unittest.main()

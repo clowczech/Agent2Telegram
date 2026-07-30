@@ -70,22 +70,52 @@ def _cmd_notify(args) -> int:
     except ConfigError as e:
         print(f"✗ {e}", file=sys.stderr)
         return 2
-    text = args.message if args.message is not None else sys.stdin.read()
+    files = list(getattr(args, "file", None) or [])
+    text = args.message if args.message is not None else ("" if files else sys.stdin.read())
     text = (text or "").strip()
-    if not text:
-        print("✗ nothing to send (pass a message or pipe it on stdin)", file=sys.stderr)
+    if not text and not files:
+        print("✗ nothing to send (pass a message, pipe it on stdin, or use --file)", file=sys.stderr)
         return 2
     if not cfg.allowed_user_ids:
         print("✗ no owner to notify (allowed_user_ids is empty)", file=sys.stderr)
         return 2
     from .telegram import TelegramClient, TelegramError
+    from pathlib import Path
+    client = TelegramClient(cfg.token)
+    owner = cfg.allowed_user_ids[0]
     try:
-        TelegramClient(cfg.token).send_message(cfg.allowed_user_ids[0], text)
+        if text:
+            client.send_message(owner, text)
+            print("✓ sent")
     except TelegramError as e:
         print(f"✗ send failed: {e}", file=sys.stderr)
         return 1
-    print("✓ sent")
-    return 0
+    # Same allowlist as the in-chat `[tg-file]` marker: a background job is not more
+    # trusted than the agent, so it may only send from the outbox folders.
+    allowed = cfg.allowed_outbox_dirs()
+    rc = 0
+    for raw in files:
+        try:
+            path = Path(raw).expanduser().resolve()
+        except OSError as e:
+            print(f"✗ {raw}: cannot resolve ({e.__class__.__name__})", file=sys.stderr)
+            rc = 1
+            continue
+        if not any(path == d or d in path.parents for d in allowed):
+            print(f"✗ {path.name}: outside the allowed folders (see 'outbox_dirs')", file=sys.stderr)
+            rc = 1
+            continue
+        if not path.is_file() or path.stat().st_size == 0:
+            print(f"✗ {path.name}: not a regular non-empty file", file=sys.stderr)
+            rc = 1
+            continue
+        try:
+            client.send_file(owner, path)
+            print(f"✓ sent {path.name}")
+        except TelegramError as e:
+            print(f"✗ {path.name}: {e}", file=sys.stderr)
+            rc = 1
+    return rc
 
 
 def _cmd_doctor(_args) -> int:
@@ -206,6 +236,8 @@ def main(argv: list[str] | None = None) -> int:
     nt = sub.add_parser("notify", help="push a message to the owner (for cron/background jobs)")
     nt.add_argument("message", nargs="?", help="text to send (omit to read from stdin)")
     nt.add_argument("--config", help="path to a specific bridge config")
+    nt.add_argument("--file", action="append",
+                    help="attach a file from an outbox folder (repeatable)")
     sub.add_parser("service", help="print a systemd/launchd service unit")
     sub.add_parser("doctor", help="diagnose config and agent availability")
     st = sub.add_parser("selftest", help="end-to-end attach test against a real agent (no bot)")

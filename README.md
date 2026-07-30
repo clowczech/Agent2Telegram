@@ -321,3 +321,11 @@ symlinks are resolved *before* the check, so a link inside the outbox pointing a
 
 A refused attachment is always reported back into the chat — silently dropping a file
 would be worse than a visible error.
+
+From cron or a background job (where there is no Telegram turn to reply in) use
+`notify`, which enforces the same allowlist:
+
+```
+python -m agent2telegram notify --file ~/.local/state/agent2telegram/outbox/clip.mp4 \
+    "render finished"
+```

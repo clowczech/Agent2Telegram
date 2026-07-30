@@ -22,3 +22,8 @@
   z outboxu na credentials).
 - Ostrá zkouška odeslání proběhla. **Push až po Petrově OK a několika dnech provozu**
   (pravidlo: GitHub = produkce).
+- Doplněno: `notify --file` (stejná allowlist hranice) – cesta pro cron a běhy na pozadí,
+  kde není Telegram turn, do kterého odpovědět. 127 testů zelených.
+- Restart bridge při testu: bridge se restartoval PŘESNĚ ve chvíli, kdy měla odejít
+  odpověď, a ta se ztratila. Poučení: restartovat mezi turny a po restartu ověřit,
+  že poslední zpráva došla (`FWD (send)` v logu).
