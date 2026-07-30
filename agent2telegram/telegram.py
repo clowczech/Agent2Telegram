@@ -15,7 +15,10 @@ from __future__ import annotations
 import html as _html
 import json
 import logging
+import mimetypes
+import os
 import re
+import secrets
 import socket
 import time
 import urllib.error
@@ -252,6 +255,104 @@ class TelegramClient:
             self._call("sendChatAction", {"chat_id": chat_id, "action": action}, timeout=8, retries=0)
         except TelegramError:
             pass  # purely cosmetic; never let it break a turn
+
+    # ---- files ---------------------------------------------------------------
+    # Telegram accepts up to 50 MB per file for bots. Anything larger has to be shared
+    # some other way (link), so we fail early with a clear message instead of uploading
+    # for minutes and then getting a 413.
+    MAX_UPLOAD = 50 * 1024 * 1024
+
+    #: extension -> (API method, form field). Order matters only for readability.
+    _KINDS = {
+        ".mp4": ("sendVideo", "video"), ".mov": ("sendVideo", "video"),
+        ".m4v": ("sendVideo", "video"), ".webm": ("sendVideo", "video"),
+        ".mp3": ("sendAudio", "audio"), ".m4a": ("sendAudio", "audio"),
+        ".aac": ("sendAudio", "audio"), ".flac": ("sendAudio", "audio"),
+        ".ogg": ("sendAudio", "audio"), ".opus": ("sendAudio", "audio"),
+        ".wav": ("sendAudio", "audio"),
+        ".jpg": ("sendPhoto", "photo"), ".jpeg": ("sendPhoto", "photo"),
+        ".png": ("sendPhoto", "photo"), ".webp": ("sendPhoto", "photo"),
+    }
+
+    @classmethod
+    def kind_for(cls, path) -> tuple[str, str]:
+        """Pick the API method for a file. Unknown types go as a document, which always
+        works and keeps the original bytes intact."""
+        return cls._KINDS.get(os.path.splitext(str(path))[1].lower(), ("sendDocument", "document"))
+
+    def _call_multipart(self, method: str, fields: dict, file_field: str, filename: str,
+                        payload: bytes, *, timeout: float = 300) -> dict:
+        """One multipart/form-data POST. Written by hand so the project keeps its
+        stdlib-only promise (see module docstring)."""
+        boundary = "----a2t" + secrets.token_hex(16)
+        crlf = b"\r\n"
+        body = bytearray()
+        for key, val in fields.items():
+            if val is None:
+                continue
+            body += b"--" + boundary.encode() + crlf
+            body += f'Content-Disposition: form-data; name="{key}"'.encode() + crlf + crlf
+            body += str(val).encode("utf-8") + crlf
+        ctype = mimetypes.guess_type(filename)[0] or "application/octet-stream"
+        body += b"--" + boundary.encode() + crlf
+        body += (f'Content-Disposition: form-data; name="{file_field}"; '
+                 f'filename="{filename}"').encode() + crlf
+        body += f"Content-Type: {ctype}".encode() + crlf + crlf
+        body += payload + crlf
+        body += b"--" + boundary.encode() + b"--" + crlf
+
+        url = f"{API_ROOT}/bot{self._token}/{method}"
+        attempt = 0
+        while True:
+            attempt += 1
+            req = urllib.request.Request(url, data=bytes(body), method="POST")
+            req.add_header("Content-Type", f"multipart/form-data; boundary={boundary}")
+            try:
+                with self._opener.open(req, timeout=timeout) as resp:
+                    out = json.loads(resp.read().decode("utf-8"))
+                if not out.get("ok"):
+                    raise TelegramError(f"{method}: {out.get('description', 'unknown error')}")
+                return out["result"]
+            except urllib.error.HTTPError as e:
+                retry_after = self._retry_after(e)
+                if retry_after is not None:
+                    log.warning("Flood control on %s, waiting %ss", method, retry_after)
+                    time.sleep(retry_after + 0.5)
+                    continue
+                if e.code >= 500 and attempt <= self._max_retries:
+                    log.warning("%s: HTTP %s, retry %d", method, e.code, attempt)
+                    self._backoff(attempt)
+                    continue
+                raise TelegramError(f"{method}: HTTP {e.code} {e.reason}") from e
+            except (urllib.error.URLError, TimeoutError, ConnectionError, json.JSONDecodeError) as e:
+                if attempt <= self._max_retries:
+                    log.warning("%s: %s, retry %d", method, e, attempt)
+                    self._backoff(attempt)
+                    continue
+                raise TelegramError(f"{method}: {e}") from e
+
+    def send_file(self, chat_id: int, path, *, caption: str | None = None,
+                  meta: dict | None = None) -> None:
+        """Upload one local file. The method is chosen from the extension, so a video
+        arrives as a playable video and audio as a track, not as a nondescript blob."""
+        path = os.fspath(path)
+        size = os.path.getsize(path)
+        if size > self.MAX_UPLOAD:
+            raise TelegramError(
+                f"{os.path.basename(path)} is {size // 1048576} MB; bots can send at most "
+                f"{self.MAX_UPLOAD // 1048576} MB — share a link instead")
+        method, field = self.kind_for(path)
+        fields = {"chat_id": chat_id}
+        if caption:
+            fields["caption"] = caption[:1024]
+        if method == "sendVideo":
+            fields["supports_streaming"] = "true"
+        for k, v in (meta or {}).items():          # width/height/duration/title/performer
+            fields[k] = v
+        with open(path, "rb") as fh:
+            payload = fh.read()
+        self._call_multipart(method, fields, field, os.path.basename(path), payload)
+        log.info("sent %s (%s, %d bytes)", os.path.basename(path), method, size)
 
     def send_message(self, chat_id: int, text: str, *, parse_mode: str = "auto") -> None:
         """Send text, splitting to Telegram's size limit. By default (``parse_mode="auto"``)

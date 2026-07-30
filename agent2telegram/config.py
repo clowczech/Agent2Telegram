@@ -50,6 +50,25 @@ class Config:
     claude_session_id: str = ""         # guard: only act on this session's transcript
     progress_marker: str = "[tg]"       # lines starting with this are sent live (interim)
     bot_username: str = ""              # the bot's @username (non-secret; for t.me/ deep links)
+    # Directories the agent may send files FROM (see `file_marker`). Deliberately narrow:
+    # the path comes from the agent's own reply text, so a wide allowlist would turn a
+    # prompt-injection into file exfiltration. Empty list = the default outbox only.
+    outbox_dirs: list[str] = field(default_factory=list)
+    file_marker: str = "[tg-file]"       # lines like `[tg-file] /path/clip.mp4` upload that file
+
+    def path_outbox(self) -> Path:
+        """Default place to put files meant for Telegram."""
+        return _state_dir() / "outbox"
+
+    def allowed_outbox_dirs(self) -> list[Path]:
+        """Resolved allowlist. The default outbox is always in, extra dirs come from config."""
+        dirs = [self.path_outbox()]
+        for d in self.outbox_dirs or []:
+            try:
+                dirs.append(Path(d).expanduser().resolve())
+            except OSError:
+                continue
+        return dirs
 
     def path_workdir(self) -> Path:
         base = Path(self.workdir).expanduser() if self.workdir else (_state_dir() / "chats")

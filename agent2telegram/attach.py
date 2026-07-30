@@ -560,6 +560,16 @@ class AttachBridge:
             return
         if key and key in self._sent_keys:
             return
+        # `[tg-file] <path>` lines are attachments, not content — pull them out, send the
+        # text first, then upload. Without this the agent had to bypass the bridge with a
+        # raw curl, which is exactly what we do not want (markdown broke, [tg] leaked).
+        if self.cfg.file_marker and self.cfg.file_marker.lower() in text.lower():
+            text, files = self._extract_files(text)
+            if files:
+                self._pending_files = getattr(self, "_pending_files", []) + files
+            if not text:
+                self._flush_files()
+                return
         if self._pending_send:                       # something already waiting → keep FIFO order
             self._enqueue(text, key, turn_text=turn_text)
             return
@@ -574,6 +584,7 @@ class AttachBridge:
         if turn_text:
             self._turn_text_sent = True
         log.info("FWD (send) %r", text[:30])
+        self._flush_files()
 
     def _flush_pending(self) -> None:
         """Re-send queued replies FIFO until one fails (then stop, preserving order for next pass).
@@ -1130,6 +1141,67 @@ class AttachBridge:
         if self._turn_from_tg:
             self._last_activity = time.monotonic()
 
+    # ---- outgoing files ------------------------------------------------------
+    def _safe_outbox_path(self, raw: str):
+        """Validate a path the AGENT asked to send. Returns the resolved path or a reason.
+
+        The path comes from the agent's own reply text, so this is the security boundary:
+        without it, anything able to influence the agent's output could make the bridge
+        upload `~/.ssh/id_rsa`. Rules: must resolve inside an allowed directory (symlinks
+        are followed BEFORE the check), must be a regular file, must be non-empty.
+        """
+        try:
+            path = Path(raw).expanduser().resolve()
+        except OSError as e:
+            return None, f"cannot resolve ({e.__class__.__name__})"
+        allowed = self.cfg.allowed_outbox_dirs()
+        if not any(path == d or d in path.parents for d in allowed):
+            return None, ("outside the allowed folders — put it in "
+                          f"{self.cfg.path_outbox()} or add the folder to 'outbox_dirs'")
+        if not path.is_file():
+            return None, "not a regular file"
+        if path.stat().st_size == 0:
+            return None, "file is empty"
+        return path, "ok"
+
+    def _extract_files(self, text: str):
+        """Pull `[tg-file] <path>` lines out of a reply. Returns (text without them, paths)."""
+        marker = self.cfg.file_marker.lower()
+        keep, wanted = [], []
+        for ln in text.splitlines():
+            s = ln.strip()
+            if s.lower().startswith(marker):
+                arg = s[len(self.cfg.file_marker):].strip().strip('"').strip("'")
+                if arg:
+                    wanted.append(arg)
+                continue
+            keep.append(ln)
+        return "\n".join(keep).strip(), wanted
+
+    def _send_files(self, paths: list[str]) -> None:
+        """Upload the requested files. A rejection is always reported back to the chat —
+        silently dropping an attachment would be worse than a visible error."""
+        for raw in paths:
+            resolved, reason = self._safe_outbox_path(raw)
+            if resolved is None:
+                log.warning("refusing to send %r: %s", raw, reason)
+                self._send_final(f"⚠️ Couldn't send {Path(raw).name}: {reason}", turn_text=False)
+                continue
+            try:
+                self.tg.send_file(self._owner_chat, resolved)
+            except Exception as e:
+                log.warning("file send failed (%s): %s", resolved.name, e)
+                self._send_final(f"⚠️ Couldn't send {resolved.name}: {e}", turn_text=False)
+
+    def _flush_files(self) -> None:
+        """Upload whatever the last reply asked for. Kept separate from the text path so a
+        failed upload can never block or duplicate the message itself."""
+        files = getattr(self, "_pending_files", [])
+        if not files:
+            return
+        self._pending_files = []
+        self._send_files(files)
+
     def _strip_marker(self, text: str) -> str:
         """Remove the progress marker (e.g. ``[TG]``) from the start of *any* line. It's a routing
         token, never content — so a stray one mid-message (narration before the marked reply) must
@@ -1259,6 +1331,11 @@ class AttachBridge:
         d = Path.home() / ".local/state/agent2telegram/attachments"
         d.mkdir(parents=True, exist_ok=True)
         dest = d / name
+        if dest.exists():
+            i = 1
+            while (cand := d / f"{dest.stem}-{i}{dest.suffix}").exists():
+                i += 1
+            dest = cand
         dest.write_bytes(data)
         log.info("saved attachment -> %s (%d bytes)", dest, len(data))
         return f"[The user attached a file saved at: {dest} — open and use it as appropriate.]"

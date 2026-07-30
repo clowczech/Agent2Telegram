@@ -295,3 +295,29 @@ python3 -m unittest discover -s tests -v   # zero-dependency test suite
 ## License
 
 MIT — see [LICENSE](LICENSE).
+
+## Sending files from the agent
+
+The agent can attach a file by putting a line like this in its reply:
+
+```
+[tg-file] /Users/me/.local/state/agent2telegram/outbox/clip.mp4
+```
+
+The bridge removes that line from the message, sends the text, then uploads the file.
+The API method follows the extension, so video arrives playable, audio as a track and
+images as photos; anything else goes as a document. Bots can upload at most 50 MB —
+larger files fail immediately with a clear message instead of a long doomed upload.
+
+**The path is checked against an allowlist, and that is a security boundary.** The path
+comes from the agent's own reply text, so a wide allowlist would turn a prompt injection
+into file exfiltration. By default only `~/.local/state/agent2telegram/outbox` is allowed;
+symlinks are resolved *before* the check, so a link inside the outbox pointing at
+`~/.ssh/id_rsa` is refused. Add more folders explicitly if you need them:
+
+```json
+{ "outbox_dirs": ["/Users/me/renders"] }
+```
+
+A refused attachment is always reported back into the chat — silently dropping a file
+would be worse than a visible error.
