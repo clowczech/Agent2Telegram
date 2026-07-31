@@ -850,7 +850,7 @@ class QueuedAckTests(unittest.TestCase):
     def test_message_during_work_is_acknowledged(self):
         with tempfile.TemporaryDirectory() as td:
             b = self._bridge_v_praci(td)
-            b._handle(_msg(9001, "ještě jedna věc"))
+            b._handle_update_once(_msg(9001, "ještě jedna věc"), 9001)
             self.assertTrue(any("Mám tvoji zprávu" in s for s in b.tg.sent),
                             "zpráva během práce se nepotvrdila – uživatel neví, že dorazila")
 
@@ -858,7 +858,7 @@ class QueuedAckTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             b = self._bridge_v_praci(td)
             for i in range(5):
-                b._handle(_msg(9100 + i, f"zpráva {i}"))
+                b._handle_update_once(_msg(9100 + i, f"zpráva {i}"), 9100 + i)
             potvrzeni = [s for s in b.tg.sent if "Mám tvoji zprávu" in s]
             self.assertEqual(len(potvrzeni), 1,
                              f"přišlo {len(potvrzeni)} potvrzení místo jednoho – spam")
@@ -868,6 +868,6 @@ class QueuedAckTests(unittest.TestCase):
             b = _bridge(td)
             b._turn_active.clear()    # nic neběží → odpověď přijde rovnou, potvrzení je zbytečné
             b._last_queue_ack = 0.0
-            b._handle(_msg(9200, "ahoj"))
+            b._handle_update_once(_msg(9200, "ahoj"), 9200)
             self.assertFalse(any("Mám tvoji zprávu" in s for s in b.tg.sent),
                              "potvrzení se posílá i když nic neběží – zbytečný šum")

@@ -609,6 +609,10 @@ class AttachBridge:
             log.error("update %s se nepodařilo uložit, offset neposouvám: %s", update_id, e)
             return offset
         self._save_offset(next_offset)
+        # Potvrdit příjem MUSÍ poller, ne worker: worker zpracovává zprávy po jedné, takže
+        # druhá zpráva se ke slovu dostane až po dokončení první – potvrzení by přišlo pozdě
+        # a k ničemu. Ověřeno naživo 31. 7.: v původní podobě nedorazilo ani jednou.
+        self._maybe_ack_queued(upd)
         self._submit_inbound_update(upd, record_id)
         self._mark_update_processed(update_id)
         return next_offset
@@ -980,11 +984,6 @@ class AttachBridge:
             self.tg.send_message(chat_id, "⛔ Not authorized.")
             return True
 
-        # Zpráva přišla, zatímco běží jiný turn → dát hned vědět, že je přijatá.
-        # Bez toho uživatel neví, jestli se ztratila, a píše znovu (Petr 2026-07-31; přesně
-        # tohle se dnes stalo několikrát). Cooldown brání tomu, aby při pěti zprávách za sebou
-        # přišlo pět potvrzení.
-        self._maybe_ack_queued(chat_id)
 
         # Bridge-level slash commands (e.g. /start, /help) are answered here instead of being
         # forwarded to the agent — so the first contact is a friendly intro, not the agent
@@ -1015,16 +1014,22 @@ class AttachBridge:
             return self._inject(text)
         return True
 
-    def _maybe_ack_queued(self, chat_id: int) -> None:
+    def _maybe_ack_queued(self, upd: dict) -> None:
         """Potvrdí příjem zprávy, která přišla během rozdělané práce."""
         if not self._turn_active.is_set():
+            return
+        msg = upd.get("message") or upd.get("edited_message") or {}
+        if msg.get("from", {}).get("id") not in self._allowed:
+            return
+        chat_id = (msg.get("chat") or {}).get("id")
+        if chat_id is None:
             return
         ted = time.monotonic()
         if ted - getattr(self, "_last_queue_ack", 0.0) < QUEUE_ACK_COOLDOWN:
             return
         self._last_queue_ack = ted
         try:
-            self.tg.send_message(chat_id, "⚡ Mám tvoji zprávu — dodělám rozdělanou věc "
+            self.tg.send_message(chat_id, "⚡ Mám tvoji zprávu – dodělám rozdělanou věc "
                                           "a hned se jí budu věnovat.")
         except Exception as e:
             log.warning("potvrzení příjmu se nepodařilo odeslat: %s", e)
