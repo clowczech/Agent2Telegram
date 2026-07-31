@@ -235,7 +235,7 @@ class TmuxSession:
                  boot_wait: float = 2.0,
                  expected_agent_commands: list[str] | tuple[str, ...] | None = None) -> None:
         if shutil.which("tmux") is None:
-            raise SessionError("tmux is not installed. Install tmux (e.g. `brew install tmux` "
+            raise SessionError("tmux is not installed. Install it first: `sudo apt install tmux` (Debian/Ubuntu) or `brew install tmux` (macOS) — "
                                "or `apt install tmux`) — the persistent session needs it.")
         self.name = name or ("a2t_" + uuid.uuid4().hex[:10])
         self._timeout = timeout

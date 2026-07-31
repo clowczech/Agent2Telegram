@@ -12,6 +12,9 @@ import argparse
 import logging
 import sys
 
+from .config import ConfigError
+from .session import SessionError
+
 
 def _setup_logging(verbose: bool) -> None:
     logging.basicConfig(
@@ -285,3 +288,10 @@ if __name__ == "__main__":
         sys.exit(main())
     except KeyboardInterrupt:
         sys.exit(130)
+    except (SessionError, ConfigError) as e:
+        # Chybějící tmux nebo špatná konfigurace NENÍ pád programu – je to něco, co má
+        # uživatel udělat. Traceback tady jen děsí: člověk, který bridge instaluje poprvé,
+        # z něj vyčte "rozbilo se to", místo "doinstaluj tmux". Hláška té výjimky už tu
+        # radu obsahuje, tak ji ukážeme samotnou. (Instalace naslepo na Ubuntu, Fable 2026-07-31.)
+        print(f"\n{e}\n", file=sys.stderr)
+        sys.exit(2)
