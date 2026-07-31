@@ -58,6 +58,9 @@ INBOUND_RETRY_INTERVAL = 30.0
 # protože při dlouhé práci s desítkami průběžných zpráv se to sčítalo do znatelného zpoždění.
 # Cena je častější čtení fronty – proto se to měřilo, ne odhadovalo (viz níže v commitu).
 OUTBOUND_TICK = 0.15
+# Jak dlouho po potvrzení příjmu se další potvrzení neposílá. Pět zpráv za sebou má vyvolat
+# jedno "mám to", ne pět.
+QUEUE_ACK_COOLDOWN = 30.0
 #: How often we re-assert the "typing…" chat action (Telegram shows it for ~5s). Kept well
 #: under that window so a turn never shows a gap, even right after a sent message clears it.
 TYPING_INTERVAL = 1.5
@@ -977,6 +980,12 @@ class AttachBridge:
             self.tg.send_message(chat_id, "⛔ Not authorized.")
             return True
 
+        # Zpráva přišla, zatímco běží jiný turn → dát hned vědět, že je přijatá.
+        # Bez toho uživatel neví, jestli se ztratila, a píše znovu (Petr 2026-07-31; přesně
+        # tohle se dnes stalo několikrát). Cooldown brání tomu, aby při pěti zprávách za sebou
+        # přišlo pět potvrzení.
+        self._maybe_ack_queued(chat_id)
+
         # Bridge-level slash commands (e.g. /start, /help) are answered here instead of being
         # forwarded to the agent — so the first contact is a friendly intro, not the agent
         # puzzling over "/start". Only plain-text commands, never media captions.
@@ -1005,6 +1014,20 @@ class AttachBridge:
             self._begin_turn()
             return self._inject(text)
         return True
+
+    def _maybe_ack_queued(self, chat_id: int) -> None:
+        """Potvrdí příjem zprávy, která přišla během rozdělané práce."""
+        if not self._turn_active.is_set():
+            return
+        ted = time.monotonic()
+        if ted - getattr(self, "_last_queue_ack", 0.0) < QUEUE_ACK_COOLDOWN:
+            return
+        self._last_queue_ack = ted
+        try:
+            self.tg.send_message(chat_id, "⚡ Mám tvoji zprávu — dodělám rozdělanou věc "
+                                          "a hned se jí budu věnovat.")
+        except Exception as e:
+            log.warning("potvrzení příjmu se nepodařilo odeslat: %s", e)
 
     def _begin_turn(self) -> None:
         # Light "typing…" from the actual injection point.

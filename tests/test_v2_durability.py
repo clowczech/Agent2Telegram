@@ -831,3 +831,43 @@ class LedgerWriteFailureTests(unittest.TestCase):
             b._sent_path = Path(td) / "sent_uuids"
             self.assertTrue(b._mark_sent("klic-2"))
             self.assertIn("klic-2", b._sent_path.read_text())
+
+
+class QueuedAckTests(unittest.TestCase):
+    """Zpráva doručená během rozdělané práce se má hned potvrdit.
+
+    Petr 2026-07-31: „když ti pošlu více zpráv najednou, mohli bychom dát vědět, že to budeš
+    řešit" – jako to dělá Hermes. Bez potvrzení neví, jestli se zpráva ztratila, a píše znovu.
+    Přesně to se dnes několikrát stalo.
+    """
+
+    def _bridge_v_praci(self, td):
+        b = _bridge(td)
+        b._turn_active.set()          # něco už běží
+        b._last_queue_ack = 0.0
+        return b
+
+    def test_message_during_work_is_acknowledged(self):
+        with tempfile.TemporaryDirectory() as td:
+            b = self._bridge_v_praci(td)
+            b._handle(_msg(9001, "ještě jedna věc"))
+            self.assertTrue(any("Mám tvoji zprávu" in s for s in b.tg.sent),
+                            "zpráva během práce se nepotvrdila – uživatel neví, že dorazila")
+
+    def test_five_messages_produce_one_ack_not_five(self):
+        with tempfile.TemporaryDirectory() as td:
+            b = self._bridge_v_praci(td)
+            for i in range(5):
+                b._handle(_msg(9100 + i, f"zpráva {i}"))
+            potvrzeni = [s for s in b.tg.sent if "Mám tvoji zprávu" in s]
+            self.assertEqual(len(potvrzeni), 1,
+                             f"přišlo {len(potvrzeni)} potvrzení místo jednoho – spam")
+
+    def test_no_ack_when_nothing_is_running(self):
+        with tempfile.TemporaryDirectory() as td:
+            b = _bridge(td)
+            b._turn_active.clear()    # nic neběží → odpověď přijde rovnou, potvrzení je zbytečné
+            b._last_queue_ack = 0.0
+            b._handle(_msg(9200, "ahoj"))
+            self.assertFalse(any("Mám tvoji zprávu" in s for s in b.tg.sent),
+                             "potvrzení se posílá i když nic neběží – zbytečný šum")
