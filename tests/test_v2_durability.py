@@ -798,3 +798,36 @@ class OutboxDirCollisionTests(unittest.TestCase):
             self.assertTrue(cizi_json.exists(), "fronta zabavila cizí .json z uživatelské složky")
             self.assertNotIn("dead-letter", [p.name for p in uzivatelska.iterdir()],
                              "fronta si udělala své složky v uživatelském outboxu")
+
+
+class LedgerWriteFailureTests(unittest.TestCase):
+    def test_record_stays_queued_when_the_ledger_cannot_be_written(self):
+        """Když se ledger nezapíše na disk, záznam NESMÍ z fronty zmizet.
+
+        Sol při finální kontrole: `_mark_sent` spolkl OSError, takže klíč zůstal jen v paměti,
+        volající záznam smazal a po restartu se TÁŽ odpověď odeslala znovu. Duplicita přesně
+        ve chvíli, kdy je disk plný. Test schválně necílí na SystemExit (to byla chyba
+        původního testu), ale na reálný OSError z appendu, který produkční kód ignoroval.
+        """
+        with tempfile.TemporaryDirectory() as td:
+            b = _bridge(td)
+            b._sent_path = Path(td) / "nejde" / "sent_uuids"
+            puvodni_open = open
+
+            def _rozbity_open(soubor, *a, **kw):
+                if str(soubor) == str(b._sent_path):
+                    raise OSError(28, "No space left on device")
+                return puvodni_open(soubor, *a, **kw)
+
+            import builtins
+            builtins.open = _rozbity_open
+            try:
+                self.assertFalse(b._mark_sent("klic-1"),
+                                 "_mark_sent má ohlásit, že zápis na disk nevyšel")
+            finally:
+                builtins.open = puvodni_open
+
+            # a po obnovení disku se zapíše normálně
+            b._sent_path = Path(td) / "sent_uuids"
+            self.assertTrue(b._mark_sent("klic-2"))
+            self.assertIn("klic-2", b._sent_path.read_text())

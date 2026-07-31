@@ -18,6 +18,7 @@ from collections import deque
 import glob
 import html
 import json
+import os
 import logging
 import queue
 import subprocess
@@ -442,17 +443,30 @@ class AttachBridge:
             self._tpos = last_user_end
             self._turn_from_tg = from_tg
 
-    def _mark_sent(self, uuid: str) -> None:
-        """Record a forwarded message uuid in memory and on disk (append-only ledger)."""
-        if not uuid or uuid in self._sent_keys:
-            return
+    def _mark_sent(self, uuid: str) -> bool:
+        """Zapíše uuid doručené zprávy do paměti i na disk. Vrací, jestli zápis na disk vyšel.
+
+        Návratová hodnota je podstatná: dřív se `OSError` tiše spolkl, takže klíč zůstal jen
+        v paměti. Volající pak smazal záznam z fronty a po restartu se TÁŽ odpověď odeslala
+        znovu – tedy duplicita přesně ve chvíli, kdy je disk plný. Našel Sol při finální
+        kontrole se slovy, že oprava pořadí zápisu je "jen naoko"; měl pravdu.
+        """
+        if not uuid:
+            return True
+        if uuid in self._sent_keys:
+            return True
         self._sent_keys.add(uuid)
         try:
             self._sent_path.parent.mkdir(parents=True, exist_ok=True)
             with open(self._sent_path, "a", encoding="utf-8") as f:
                 f.write(uuid + "\n")
-        except OSError:
-            pass
+                f.flush()
+                os.fsync(f.fileno())
+            return True
+        except OSError as e:
+            log.error("ledger doručených zpráv se nepodařilo zapsat (%s) – "
+                      "záznam nechávám ve frontě, ať se odpověď neodešle dvakrát", e)
+            return False
 
     # ---- inbound update persistence -----------------------------------------
     def _init_update_state(self) -> None:
@@ -753,8 +767,10 @@ class AttachBridge:
                 outbox.mark_file_sent(rec.record_id, cesta)
             if vzdano:
                 continue          # záznam je v dead-letter, fronta jede dál
-            if rec.key:
-                self._mark_sent(rec.key)
+            if rec.key and not self._mark_sent(rec.key):
+                # Ledger se nezapsal → záznam ve frontě ZŮSTÁVÁ. Doručené části jsou
+                # označené, takže se neposílají znovu; příští cyklus jen zkusí dokončit.
+                return
             outbox.done(rec.record_id)
             log.info("FWD (doručeno) %d částí, %d příloh",
                      len(rec.chunks), len(rec.files))
