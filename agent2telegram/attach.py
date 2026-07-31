@@ -23,10 +23,12 @@ import queue
 import subprocess
 import threading
 import time
+from contextlib import contextmanager
 from pathlib import Path
 
 from . import adapters
 from . import readers
+from .compat import AlreadyRunning, single_instance_lock
 from .config import Config, _state_dir
 from .durable import DurableInbox, DurableOutbox
 from .session import SessionError, TmuxSession
@@ -356,6 +358,30 @@ class AttachBridge:
 
     # ---- lifecycle ---------------------------------------------------------
     def run(self) -> None:
+        # Zámek na state dir. Dvě instance nad jedním botem se perou o getUpdates (409),
+        # obě mohou injektovat tentýž update a obě drainovat stejnou frontu – zprávy pak
+        # mizí i duplikují. Zámek byl v compat.py napsaný a otestovaný, ale nikdy se
+        # nevolal (křížová recenze: Sol #3, Fable F3), takže ta ochrana byla jen na papíře.
+        with self._instance_lock():
+            self._run_locked()
+
+    @contextmanager
+    def _instance_lock(self):
+        cesta = getattr(self, "_offset_file", None)
+        if cesta is None:
+            yield
+            return
+        try:
+            with single_instance_lock(Path(cesta).parent / "bridge.lock"):
+                yield
+        except AlreadyRunning:
+            raise RuntimeError(
+                f"Nad stavem {Path(cesta).parent} už běží jiná instance bridge. "
+                "Dvě naráz si přetahují zprávy – ukonči tu druhou, nebo dej každé "
+                "vlastní AGENT2TELEGRAM_STATE."
+            ) from None
+
+    def _run_locked(self) -> None:
         me = self.tg.get_me()
         log.info("Attach bridge live as @%s → tmux '%s', owner=%s",
                  me.get("username"), self.cfg.tmux_session, self._owner_chat)
@@ -543,14 +569,18 @@ class AttachBridge:
         #
         # Nově: nejdřív zápis na disk, teprve pak ACK. Když zápis selže, offset se NEPOSUNE
         # a Telegram nám zprávu pošle znovu – radši dvakrát než nikdy.
-        record_id = None
         inbox = self._ensure_inbox()
-        if inbox is not None:
-            try:
-                record_id = inbox.reserve(upd)
-            except Exception as e:
-                log.error("update %s se nepodařilo uložit, offset neposouvám: %s", update_id, e)
-                return offset
+        if inbox is None:
+            # Bez trvalého úložiště se offset posunout NESMÍ. Dřív se v tomhle případě
+            # pokračovalo po staré ztrátové cestě – tedy přesně tehdy, když je disk plný
+            # nebo poškozený a durabilita je nejpotřebnější (recenze Sol #2).
+            log.error("update %s: trvalé úložiště není k dispozici, offset neposouvám", update_id)
+            return offset
+        try:
+            record_id = inbox.reserve(upd)
+        except Exception as e:
+            log.error("update %s se nepodařilo uložit, offset neposouvám: %s", update_id, e)
+            return offset
         self._save_offset(next_offset)
         self._submit_inbound_update(upd, record_id)
         self._mark_update_processed(update_id)
@@ -737,6 +767,27 @@ class AttachBridge:
         self._start_inbound_worker()
         self._inbound_queue.put((upd, record_id))
 
+    def _replay_pending_inbound(self) -> int:
+        """Po startu doručí zprávy, které zbyly v trvalém úložišti.
+
+        Bez tohohle byla durabilita jen poloviční: zpráva se uložila na disk, ale nikdo
+        ji odtamtud nikdy nevzal – Telegram ji už znovu nepošle, takže by tam ležela až
+        do vypršení retence. Našli Sol i Fable nezávisle při křížové recenzi.
+        """
+        inbox = self._ensure_inbox()
+        if inbox is None:
+            return 0
+        try:
+            cekajici = inbox.pending()
+        except Exception as e:
+            log.error("nepodařilo se přečíst zbylé příchozí zprávy: %s", e)
+            return 0
+        for rec in cekajici:
+            self._submit_inbound_update(rec.update, rec.record_id)
+        if cekajici:
+            log.info("po startu doručuji %d zprávu/y, které zbyly z minula", len(cekajici))
+        return len(cekajici)
+
     def _inbound_worker_loop(self) -> None:
         """Process accepted Telegram updates FIFO outside the long-poll thread.
 
@@ -789,6 +840,7 @@ class AttachBridge:
 
     def _inbound_loop(self) -> None:
         self._start_inbound_worker()
+        self._replay_pending_inbound()   # nejdřív dluh z minula, pak nové zprávy
         offset = self._load_offset()
         allowed_updates = json.dumps(["message", "edited_message", "message_reaction"])
         transient_fails = 0

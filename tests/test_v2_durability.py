@@ -196,6 +196,38 @@ class InboundDurabilityTests(unittest.TestCase):
                 f"update 1000 je nenávratně pryč: offset={offset} a žádný durable inbox",
             )
 
+    def test_pending_message_is_delivered_after_restart(self):
+        """Uložená zpráva se po restartu musí SKUTEČNĚ doručit, ne jen ležet na disku.
+
+        Křížová recenze (Sol #1, Fable F1): zápis fungoval, ale nikdo sklad při startu
+        nečetl. Telegram zprávu znovu nepošle, takže by tam ležela až do vypršení retence.
+        Test proto kontroluje `session.injected`, ne přítomnost souboru – ta nic neznamená.
+        """
+        with tempfile.TemporaryDirectory() as td:
+            b = _bridge(td)
+
+            def _die(upd, record_id=None):
+                raise SystemExit("kill uprostřed zpracování")
+
+            b._submit_inbound_update = _die
+            with self.assertRaises(SystemExit):
+                b._handle_update_once(_msg(4000, "neztrať mě"), 4000)
+
+            # restart nad stejným stavem
+            session = _OkSession()
+            b2 = _bridge(td, session=session)
+            b2._ensure_inbound_worker_state()
+            b2._replay_pending_inbound()
+            for _ in range(100):
+                if session.injected:
+                    break
+                time.sleep(0.02)
+            b2._stop.set()
+            time.sleep(0.3)
+
+            self.assertTrue(session.injected, "zpráva zůstala ležet na disku a nikdy se nedoručila")
+            self.assertIn("neztrať mě", "\n".join(session.injected))
+
     def test_handler_failure_keeps_the_message_for_retry(self):
         """Když zpracování selže, worker chybu jen zaloguje a zprávu zahodí."""
         with tempfile.TemporaryDirectory() as td:
