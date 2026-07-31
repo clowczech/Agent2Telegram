@@ -135,6 +135,7 @@ def _bridge(state_dir=None):
     b._session = _FakeSession()
     b._sent_keys = set()
     b._queue_path = None
+    b._use_durable_outbox = False       # focused inbound tests use the legacy in-memory fake
     b._pending_send = []
     b._turn_active = threading.Event()
     b._turn_from_tg = False

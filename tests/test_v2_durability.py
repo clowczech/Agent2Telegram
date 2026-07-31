@@ -668,3 +668,45 @@ class DurableTurnCoverageTests(unittest.TestCase):
 
             self.assertEqual(b.tg.sent, ["technické upozornění"])
             self.assertFalse(b._turn_text_sent, "technická zpráva neprávem potlačila backstop")
+
+
+class NoSignalOutboxTests(unittest.TestCase):
+    def test_file_only_reply_without_signal_file_survives_a_restart(self):
+        """Stop-hook signal je volitelný; nesmí rozhodovat o existenci durable outboxu."""
+        with tempfile.TemporaryDirectory() as td:
+            old_state = os.environ.get("AGENT2TELEGRAM_STATE")
+            os.environ["AGENT2TELEGRAM_STATE"] = td
+            try:
+                payload = Path(td) / "vysledek.png"
+                payload.write_bytes(b"PNG")
+
+                b = _bridge(td)
+                b._queue_path = None       # stejně jako attach config bez signal_file
+                b.cfg.file_marker = "[tg-file]"
+                b.cfg.outbox_dirs = [td]
+
+                b._send_final(f"[tg-file] {payload}")
+
+                self.assertEqual(b.tg.files, [], "producent nemá uploadovat mimo outbound smyčku")
+                queued = b._ensure_outbox().head()
+                self.assertIsNotNone(queued, "bez signal_file se příloha neuložila")
+                self.assertEqual(queued.files, (str(payload),))
+
+                # Nový objekt nad stejným state simuluje restart procesu.
+                restarted = _bridge(td)
+                restarted._queue_path = None
+                restarted.cfg.file_marker = "[tg-file]"
+                restarted.cfg.outbox_dirs = [td]
+                restarted._flush_pending()
+
+                self.assertEqual(
+                    [Path(p).resolve() for p in restarted.tg.files],
+                    [payload.resolve()],
+                    "file-only odpověď bez signal_file restart nepřežila",
+                )
+                self.assertIsNone(restarted._ensure_outbox().head())
+            finally:
+                if old_state is None:
+                    os.environ.pop("AGENT2TELEGRAM_STATE", None)
+                else:
+                    os.environ["AGENT2TELEGRAM_STATE"] = old_state

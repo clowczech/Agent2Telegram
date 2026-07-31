@@ -46,6 +46,7 @@ def _bridge(tmpdir):
     b._sent_keys = set()
     b._pending_send = []
     b._queue_path = None
+    b._use_durable_outbox = False       # focused unit test: no disk delivery side effects
     return b
 
 

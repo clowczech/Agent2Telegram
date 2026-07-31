@@ -692,9 +692,11 @@ class AttachBridge:
         if not getattr(self, "_use_durable_outbox", False):
             return None
         outbox = getattr(self, "_outbox", None)
-        if outbox is None and getattr(self, "_queue_path", None) is not None:
+        if outbox is None:
+            queue_path = getattr(self, "_queue_path", None)
+            root = Path(queue_path).parent if queue_path is not None else _state_dir(self.cfg)
             try:
-                outbox = DurableOutbox(Path(self._queue_path).parent)
+                outbox = DurableOutbox(root)
             except Exception as e:                     # doručování se nesmí zastavit
                 log.error("durable outbox se nepodařilo otevřít: %s", e)
                 outbox = None
