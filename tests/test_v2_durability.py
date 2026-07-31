@@ -384,7 +384,8 @@ class AttachmentDurabilityTests(unittest.TestCase):
             b.cfg.outbox_dirs = [td]
 
             b._send_final(f"Tady je vlna\n[tg-file] {payload}")
-            b._flush_pending()
+            b._flush_pending()  # první outbound tick: text selže
+            b._flush_pending()  # další tick: text i příloha se doposílají
 
             self.assertIn("Tady je vlna", "\n".join(client.sent), "text se nedoručil ani na druhý pokus")
             # resolve() na obou stranách: macOS má /tmp jako symlink na /private/tmp a bridge
@@ -511,8 +512,9 @@ class OutboxBlockingTests(unittest.TestCase):
             b.cfg.file_marker = "[tg-file]"
             b.cfg.outbox_dirs = [td]
 
-            b._send_final(f"[tg-file] {payload}")   # síť spadne
-            b._flush_pending()                       # síť zotavená → doposlat
+            b._send_final(f"[tg-file] {payload}")   # pouze durable enqueue
+            b._flush_pending()                       # první outbound tick: síť spadne
+            b._flush_pending()                       # další tick: síť zotavená
 
             self.assertEqual([Path(p).resolve() for p in client.files], [payload.resolve()],
                              "příloha bez textu se po výpadku sítě ztratila")
@@ -607,3 +609,27 @@ class OutboxCompletionOrderingTests(unittest.TestCase):
             self.assertIsNotNone(retained, "outbox record zmizel dřív než se uložil dedup key")
             self.assertEqual(retained.id, record_id)
             self.assertTrue(retained.complete, "Telegramem potvrzené části mají zůstat označené")
+
+
+class SingleOutboxConsumerTests(unittest.TestCase):
+    def test_send_final_only_enqueues_until_the_outbound_drain_runs(self):
+        """Producent nesmí durable record zároveň odesílat.
+
+        Telegram smí obsloužit jen outbound consumer. Jinak inbound worker a outbound
+        smyčka mohou oba přečíst stejný head a poslat tutéž část dvakrát.
+        """
+        with tempfile.TemporaryDirectory() as td:
+            b = _bridge(td)
+            b._sent_path = Path(td) / "sent-ledger"
+
+            b._send_final("pošli jednou", key="single-owner")
+
+            self.assertEqual(b.tg.sent, [], "producent obešel jediného outbound consumera")
+            queued = b._ensure_outbox().head()
+            self.assertIsNotNone(queued, "odpověď se místo enqueue ztratila")
+            self.assertEqual(queued.chunks, ("pošli jednou",))
+
+            b._flush_pending()
+
+            self.assertEqual(b.tg.sent, ["pošli jednou"])
+            self.assertIsNone(b._ensure_outbox().head())

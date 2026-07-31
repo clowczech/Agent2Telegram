@@ -663,7 +663,6 @@ class AttachBridge:
                 self._pending_files = []
                 if turn_text:
                     self._outbox_turn_text.add(rid)
-                self._flush_pending()
                 return
 
         if self._pending_send:                       # something already waiting → keep FIFO order
