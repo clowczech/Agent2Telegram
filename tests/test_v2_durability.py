@@ -476,6 +476,13 @@ class OutboxBlockingTests(unittest.TestCase):
                           "zaseklá příloha zablokovala všechny další odpovědi")
             self.assertTrue(any("Couldn't send" in s for s in client.sent),
                             "odmítnutá příloha se má ohlásit, ne tiše zmizet")
+            # Vzdaná příloha NESMÍ skončit zapsaná jako doručená – to by byla tichá ztráta
+            # v naší vlastní evidenci (regrese, kterou našel Sol ve třetím kole).
+            # Patří do dead-letter, kde je dohledatelná.
+            dead = list((Path(td) / "dead-letter").rglob("*.json"))
+            self.assertTrue(dead, "vzdaná příloha se neuložila do dead-letter")
+            self.assertNotIn(str(velky), [str(p) for p in client.files],
+                             "příloha se nikdy neodeslala, takže nesmí být vedená jako odeslaná")
 
     def test_file_only_reply_goes_through_the_durable_queue(self):
         """Odpověď složená JEN z přílohy musí jít frontou jako každá jiná.

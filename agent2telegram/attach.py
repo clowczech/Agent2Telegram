@@ -713,6 +713,7 @@ class AttachBridge:
                     log.warning("doručení části %d stále selhává: %s", index, e)
                     return
                 outbox.mark_chunk_sent(rec.record_id, index)
+            vzdano = False
             for cesta in rec.pending_files:
                 try:
                     self._send_one_file(cesta)
@@ -724,11 +725,22 @@ class AttachBridge:
                     log.warning("doručení přílohy %s selhalo (%d/%d): %s",
                                 cesta, pokusu, OUTBOX_MAX_ATTEMPTS, e)
                     if pokusu >= OUTBOX_MAX_ATTEMPTS:
+                        # NESMÍ se použít mark_file_sent: to by do vlastní evidence zapsalo,
+                        # že příloha dorazila, ačkoli nedorazila – tedy tichá ztráta, přesně
+                        # ta, kterou tenhle projekt odstraňuje. Původní podoba téhle opravy
+                        # to dělala; našel to Sol ve třetím kole revize.
+                        # Záznam jde celý do dead-letter: z fronty zmizí (neucpe ji), ale
+                        # zůstane dohledatelný i s tím, které části se doručit stihly.
                         self._ohlas_trvale_odmitnuti(Path(cesta).name, str(e))
-                        outbox.mark_file_sent(rec.record_id, cesta)
-                        continue
+                        outbox.give_up(rec.record_id, f"příloha {cesta}: {e}")
+                        log.error("příloha %s se vzdala po %d pokusech → dead-letter",
+                                  cesta, pokusu)
+                        vzdano = True
+                        break
                     return
                 outbox.mark_file_sent(rec.record_id, cesta)
+            if vzdano:
+                continue          # záznam je v dead-letter, fronta jede dál
             outbox.done(rec.record_id)
             if rec.key:
                 self._mark_sent(rec.key)
