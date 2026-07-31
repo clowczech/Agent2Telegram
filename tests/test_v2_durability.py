@@ -582,3 +582,28 @@ class LiveRetryTests(unittest.TestCase):
                 "\n".join(session.injected).count("jen jednou"), 1,
                 "zpráva se doručila víckrát – opakování nehlídá rozpracované záznamy",
             )
+
+
+class OutboxCompletionOrderingTests(unittest.TestCase):
+    def test_crash_while_writing_sent_ledger_keeps_the_completed_record(self):
+        """Po potvrzení Telegramem nesmí record zmizet dřív než jeho dedup key.
+
+        Pád při zápisu ledgeru musí ponechat kompletní record v outboxu. Po restartu
+        jej pak lze bezpečně uklidit; bez recordu i key by replay poslal celou odpověď znovu.
+        """
+        with tempfile.TemporaryDirectory() as td:
+            b = _bridge(td)
+            outbox = b._ensure_outbox()
+            record_id = outbox.enqueue(["odpověď jen jednou"], [], "reply-1")
+
+            def crash_during_ledger(_key):
+                raise SystemExit("pád při zápisu sent ledgeru")
+
+            b._mark_sent = crash_during_ledger
+            with self.assertRaises(SystemExit):
+                b._flush_pending()
+
+            retained = outbox.head()
+            self.assertIsNotNone(retained, "outbox record zmizel dřív než se uložil dedup key")
+            self.assertEqual(retained.id, record_id)
+            self.assertTrue(retained.complete, "Telegramem potvrzené části mají zůstat označené")

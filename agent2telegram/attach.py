@@ -744,9 +744,9 @@ class AttachBridge:
                 outbox.mark_file_sent(rec.record_id, cesta)
             if vzdano:
                 continue          # záznam je v dead-letter, fronta jede dál
-            outbox.done(rec.record_id)
             if rec.key:
                 self._mark_sent(rec.key)
+            outbox.done(rec.record_id)
             if rec.record_id in getattr(self, "_outbox_turn_text", set()):
                 self._turn_text_sent = True
                 self._outbox_turn_text.discard(rec.record_id)
