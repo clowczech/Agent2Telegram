@@ -1017,6 +1017,7 @@ class AttachBridge:
     def _maybe_ack_queued(self, upd: dict) -> None:
         """Potvrdí příjem zprávy, která přišla během rozdělané práce."""
         if not self._turn_active.is_set():
+            log.debug("ACK nezaslán: žádný turn neběží")
             return
         msg = upd.get("message") or upd.get("edited_message") or {}
         if msg.get("from", {}).get("id") not in self._allowed:
@@ -1031,6 +1032,9 @@ class AttachBridge:
         try:
             self.tg.send_message(chat_id, "⚡ Mám tvoji zprávu – dodělám rozdělanou věc "
                                           "a hned se jí budu věnovat.")
+            # Logovat MUSÍ: bez záznamu nejde po incidentu zjistit, jestli potvrzení odešlo.
+            # 31. 7. jsem kvůli tomu nedokázala rozhodnout, jestli feature funguje.
+            log.info("ACK příjmu odeslán (běží jiný turn)")
         except Exception as e:
             log.warning("potvrzení příjmu se nepodařilo odeslat: %s", e)
 
