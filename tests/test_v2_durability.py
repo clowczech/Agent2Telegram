@@ -746,3 +746,24 @@ class InstanceLockWiringTests(unittest.TestCase):
             # po uvolnění musí jít vzít znovu, jinak by se bridge po restartu nezvedl
             with druha._instance_lock():
                 pass
+
+    def test_run_actually_takes_the_lock(self):
+        """`run()` MUSÍ zámek vzít – ne že by ho jen uměl vzít.
+
+        Předchozí test volal `_instance_lock()` přímo, takže vyřazení zámku z `run()`
+        vůbec nepoznal (mutace prošla). Tohle je ta jediná verze, která hlídá zapojení.
+        """
+        import contextlib
+        with tempfile.TemporaryDirectory() as td:
+            b = _bridge(td)
+            pouzito = []
+
+            @contextlib.contextmanager
+            def _spion():
+                pouzito.append(True)
+                yield
+
+            b._instance_lock = _spion
+            b._run_locked = lambda: None
+            b.run()
+            self.assertTrue(pouzito, "run() zámek vůbec nevzal – ochrana proti dvěma instancím je mrtvá")
