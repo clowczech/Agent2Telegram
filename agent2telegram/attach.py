@@ -28,9 +28,9 @@ from pathlib import Path
 from . import adapters
 from . import readers
 from .config import Config, _state_dir
-from .durable import DurableInbox
+from .durable import DurableInbox, DurableOutbox
 from .session import SessionError, TmuxSession
-from .telegram import TelegramClient, TelegramError, is_network_error
+from .telegram import TelegramClient, TelegramError, is_network_error, split_message
 
 log = logging.getLogger("agent2telegram.attach")
 
@@ -143,6 +143,9 @@ def _expected_agent_commands(cfg: Config) -> list[str]:
 
 class AttachBridge:
     _turn_end_backstop_enabled = True
+    #: Durable outbox s potvrzením po částech. Podtřídy s vlastní frontou (StreamBridge)
+    #: ho vypínají – sdílejí tenhle kód, ale ne jeho životní cyklus.
+    _use_durable_outbox = True
 
     def __init__(self, cfg: Config, *, client: TelegramClient | None = None) -> None:
         if not cfg.tmux_session:
@@ -605,6 +608,25 @@ class AttachBridge:
             if not text:
                 self._flush_files()
                 return
+        # Durable outbox eviduje KAŽDOU ČÁST zvlášť. Dřív se při selhání vracel do fronty
+        # celý text, takže už doručené části dorazily podruhé – Petr to vídal jako zdvojené
+        # úvodní odstavce dlouhých odpovědí (nález D; Sol i Fable ho našli nezávisle).
+        # Přílohy do fronty nešly vůbec a po restartu mizely (nález F).
+        outbox = self._ensure_outbox()
+        if outbox is not None:
+            chunks = split_message(text) if text else []
+            soubory = list(getattr(self, "_pending_files", []) or [])
+            try:
+                rid = outbox.enqueue(chunks, soubory, key)
+            except Exception as e:
+                log.error("odchozí zprávu se nepodařilo uložit, jedu starou cestou: %s", e)
+            else:
+                self._pending_files = []
+                if turn_text:
+                    self._outbox_turn_text.add(rid)
+                self._flush_pending()
+                return
+
         if self._pending_send:                       # something already waiting → keep FIFO order
             self._enqueue(text, key, turn_text=turn_text)
             return
@@ -621,9 +643,58 @@ class AttachBridge:
         log.info("FWD (send) %r", text[:30])
         self._flush_files()
 
+    def _ensure_outbox(self) -> "DurableOutbox | None":
+        # Jen attach mód. StreamBridge tenhle kód sdílí, ale má vlastní frontu vedle configů
+        # a jiný životní cyklus – přepínat ho beze změny zadání by byla nevyžádaná změna
+        # chování (a jeho test to správně odhalil).
+        if not getattr(self, "_use_durable_outbox", False):
+            return None
+        outbox = getattr(self, "_outbox", None)
+        if outbox is None and getattr(self, "_queue_path", None) is not None:
+            try:
+                outbox = DurableOutbox(Path(self._queue_path).parent)
+            except Exception as e:                     # doručování se nesmí zastavit
+                log.error("durable outbox se nepodařilo otevřít: %s", e)
+                outbox = None
+            self._outbox = outbox
+            if not hasattr(self, "_outbox_turn_text"):
+                self._outbox_turn_text = set()
+        return outbox
+
     def _flush_pending(self) -> None:
-        """Re-send queued replies FIFO until one fails (then stop, preserving order for next pass).
-        Called every outbound cycle, so a transient network failure self-heals within ~0.4 s."""
+        """Doručí frontu FIFO a zastaví se na první chybě, aby se zachovalo pořadí.
+        Volá se každý odchozí cyklus, takže se výpadek sítě sám zahojí do ~0,4 s."""
+        outbox = self._ensure_outbox()
+        while outbox is not None and self._owner_chat is not None:
+            rec = outbox.head()
+            if rec is None:
+                break
+            # Části už potvrzené Telegramem se NEPOSÍLAJÍ znovu – jen ty zbývající.
+            for index, chunk in rec.pending_chunks:
+                try:
+                    self.tg.send_message(self._owner_chat, chunk)
+                except Exception as e:
+                    log.warning("doručení části %d stále selhává: %s", index, e)
+                    return
+                outbox.mark_chunk_sent(rec.record_id, index)
+            for cesta in rec.pending_files:
+                try:
+                    self._send_one_file(cesta)
+                except Exception as e:
+                    log.warning("doručení přílohy %s stále selhává: %s", cesta, e)
+                    return
+                outbox.mark_file_sent(rec.record_id, cesta)
+            outbox.done(rec.record_id)
+            if rec.key:
+                self._mark_sent(rec.key)
+            if rec.record_id in getattr(self, "_outbox_turn_text", set()):
+                self._turn_text_sent = True
+                self._outbox_turn_text.discard(rec.record_id)
+            else:
+                self._turn_text_sent = True
+            log.info("FWD (doručeno) %d částí, %d příloh",
+                     len(rec.chunks), len(rec.files))
+
         while self._pending_send and self._owner_chat is not None:
             item = self._pending_send[0]
             try:
@@ -1314,6 +1385,25 @@ class AttachBridge:
             except Exception as e:
                 log.warning("file send failed (%s): %s", resolved.name, e)
                 self._send_final(f"⚠️ Couldn't send {resolved.name}: {e}", turn_text=False)
+
+    def _send_one_file(self, raw: str) -> None:
+        """Pošle jednu přílohu z durable outboxu.
+
+        Rozlišuje dva druhy selhání, protože se s nimi nakládá opačně:
+        cesta mimo povolené složky je TRVALÉ odmítnutí – ohlásí se a bere se za vyřízené,
+        jinak by ucpalo frontu navěky. Chyba při odeslání je PŘECHODNÁ a propustí se ven,
+        aby ji outbox zkusil znovu.
+        """
+        resolved, reason = self._safe_outbox_path(raw)
+        if resolved is None:
+            log.warning("refusing to send %r: %s", raw, reason)
+            try:
+                self.tg.send_message(self._owner_chat,
+                                     f"⚠️ Couldn't send {Path(raw).name}: {reason}")
+            except Exception as e:
+                log.warning("nešlo ohlásit odmítnutou přílohu: %s", e)
+            return
+        self.tg.send_file(self._owner_chat, resolved)
 
     def _flush_files(self) -> None:
         """Upload whatever the last reply asked for. Kept separate from the text path so a

@@ -311,13 +311,18 @@ class AttachmentDurabilityTests(unittest.TestCase):
             client = _FailingOnce()
             b = _bridge(td, client=client)
             b.cfg.file_marker = "[tg-file]"
+            # Bez tohohle by bridge přílohu odmítl jako cestu mimo povolené složky (správně)
+            # a test by měřil tu ochranu místo durability fronty.
+            b.cfg.outbox_dirs = [td]
 
             b._send_final(f"Tady je vlna\n[tg-file] {payload}")
             b._flush_pending()
 
             self.assertIn("Tady je vlna", "\n".join(client.sent), "text se nedoručil ani na druhý pokus")
+            # resolve() na obou stranách: macOS má /tmp jako symlink na /private/tmp a bridge
+            # si cestu resolvuje. Na Linuxu je to shodné, takže porovnání platí na obou.
             self.assertEqual(
-                [str(p) for p in client.files], [str(payload)],
+                [Path(p).resolve() for p in client.files], [payload.resolve()],
                 "příloha se s frontou neuložila – po restartu by zmizela, "
                 "nebo by dorazila k úplně jiné odpovědi",
             )
