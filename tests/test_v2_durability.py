@@ -224,6 +224,41 @@ class InboundDurabilityTests(unittest.TestCase):
             )
             self.assertTrue(retained, "zpráva se po selhání handleru zahodila bez možnosti opakování")
 
+    def test_undelivered_message_stays_for_retry(self):
+        """Zpracování proběhne bez výjimky, ale zpráva se do session nedostane.
+
+        Doplněno po mutační kontrole 31. 7.: mutace `if doruceno is False:` → `if False:`
+        prošla, protože testy pokrývaly jen pád handleru výjimkou, ne tichý nezdar. Přesně
+        tenhle případ nastává, když je tmux zamrzlý – tedy ten nejčastější v provozu.
+        """
+        with tempfile.TemporaryDirectory() as td:
+            b = _bridge(td)
+            b._ensure_inbound_worker_state()
+            volani = []
+
+            def _nedoruceno(upd):
+                volani.append(upd)
+                return False
+
+            b._handle = _nedoruceno
+            b._handle_update_once(_msg(3000), 3000)
+            for _ in range(50):
+                if volani:
+                    break
+                time.sleep(0.02)
+            b._stop.set()
+            time.sleep(0.3)
+
+            self.assertTrue(volani, "handler se vůbec nespustil – špatný test")
+            self.assertTrue(
+                list(Path(td).glob("inbox/*")),
+                "nedoručená zpráva zmizela: záznam se smazal, přestože do session nedošla",
+            )
+            retained = bool(getattr(b, "_pending_inbound", None)) or bool(
+                list(Path(td).glob("inbox/*"))
+            )
+            self.assertTrue(retained, "zpráva se po selhání handleru zahodila bez možnosti opakování")
+
 
 # --------------------------------------------------------------------------------------
 # C – idle konec turnu obchází pojistku
