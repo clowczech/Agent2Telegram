@@ -424,16 +424,16 @@ class AttachBridge:
 
     # ---- inbound update persistence -----------------------------------------
     def _init_update_state(self) -> None:
-        self._offset_file = _state_dir() / "offset"
-        self._processed_updates_file = _state_dir() / "processed_updates"
+        self._offset_file = _state_dir(self.cfg) / "offset"
+        self._processed_updates_file = _state_dir(self.cfg) / "processed_updates"
         self._processed_update_ids, self._processed_update_order = self._read_processed_updates()
 
     def _ensure_update_state(self) -> None:
         # StreamBridge reuses this inbound loop but builds its state without calling our __init__.
         if not hasattr(self, "_offset_file"):
-            self._offset_file = _state_dir() / "offset"
+            self._offset_file = _state_dir(self.cfg) / "offset"
         if not hasattr(self, "_processed_updates_file"):
-            self._processed_updates_file = _state_dir() / "processed_updates"
+            self._processed_updates_file = _state_dir(self.cfg) / "processed_updates"
         if not hasattr(self, "_processed_update_ids") or not hasattr(self, "_processed_update_order"):
             self._processed_update_ids, self._processed_update_order = self._read_processed_updates()
         self._ensure_inbox()

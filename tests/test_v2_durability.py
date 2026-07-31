@@ -23,6 +23,7 @@ from pathlib import Path
 
 from agent2telegram import attach as attach_mod
 from agent2telegram.attach import AttachBridge
+from agent2telegram.compat import AlreadyRunning, single_instance_lock
 from agent2telegram.config import Config, _state_dir
 from agent2telegram.session import SessionError
 from agent2telegram.telegram import TelegramError, split_message
@@ -339,21 +340,35 @@ class StateNamespaceTests(unittest.TestCase):
         dostane sdílenou cestu – přesně to jsem si 30. 7. v 17:20 nevědomky udělala sama
         a Master pak četl cizí offset.
         """
-        with tempfile.TemporaryDirectory() as td:
-            old = os.environ.get("AGENT2TELEGRAM_STATE")
-            os.environ["AGENT2TELEGRAM_STATE"] = td
-            try:
-                a = _state_dir(Config(agent="generic", token="111:AAA", tmux_session="a"))
-                c = _state_dir(Config(agent="generic", token="222:BBB", tmux_session="b"))
-            except TypeError:
-                self.fail("_state_dir() nebere identitu bota – stav je společný pro všechny boty")
-            finally:
-                if old is None:
-                    os.environ.pop("AGENT2TELEGRAM_STATE", None)
-                else:
-                    os.environ["AGENT2TELEGRAM_STATE"] = old
+        old = os.environ.get("AGENT2TELEGRAM_STATE")
+        os.environ.pop("AGENT2TELEGRAM_STATE", None)   # výchozí cesta, jako u ručního startu
+        try:
+            a = _state_dir(Config(agent="generic", token="111:AAA", tmux_session="a"))
+            c = _state_dir(Config(agent="generic", token="222:BBB", tmux_session="b"))
+        except TypeError:
+            self.fail("_state_dir() nebere identitu bota – stav je společný pro všechny boty")
+        finally:
+            if old is not None:
+                os.environ["AGENT2TELEGRAM_STATE"] = old
 
-            self.assertNotEqual(str(a), str(c), "dva různí boti dostali stejný state dir")
+        self.assertNotEqual(str(a), str(c), "dva různí boti dostali stejný state dir")
+        for cesta in (str(a), str(c)):
+            self.assertNotIn("111:AAA", cesta, "token nesmí být v cestě – je vidět v ps i v zálohách")
+            self.assertNotIn("222:BBB", cesta)
+
+    def test_second_process_cannot_take_the_same_state_dir(self):
+        """Explicitní `AGENT2TELEGRAM_STATE` má přednost (keepalive ji nastavuje per bridge),
+        takže sdílení nelze vyloučit cestou. Musí ho vyloučit zámek – jinak se dva pollery
+        perou o getUpdates (409) a zprávy mizí."""
+        with tempfile.TemporaryDirectory() as td:
+            zamek = Path(td) / "bridge.lock"
+            with single_instance_lock(zamek):
+                with self.assertRaises(AlreadyRunning):
+                    with single_instance_lock(zamek):
+                        self.fail("druhá instance nad stejným stavem se neměla spustit")
+            # po uvolnění musí jít zámek vzít znovu, jinak by restart bridge zablokoval sám sebe
+            with single_instance_lock(zamek):
+                pass
 
 
 if __name__ == "__main__":

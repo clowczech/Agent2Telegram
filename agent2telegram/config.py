@@ -6,8 +6,10 @@ written with ``0600`` permissions and never logged.
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
+import re
 import stat
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
@@ -108,10 +110,40 @@ class Config:
         return d
 
 
-def _state_dir() -> Path:
-    return Path(
-        os.environ.get("AGENT2TELEGRAM_STATE", Path.home() / ".local" / "state" / "agent2telegram")
-    ).expanduser()
+def bot_slug(cfg) -> str:
+    """Stabilní, NETAJNÝ identifikátor bota pro cestu ke stavu.
+
+    Token do cesty nikdy nepatří (viditelný v `ps`, v logu, v záloze), takže se z něj
+    bere jen krátký otisk. Když je známé @username, použije se – je čitelné pro člověka,
+    který se přijde podívat, co v adresáři leží.
+    """
+    username = (getattr(cfg, "bot_username", "") or "").strip().lstrip("@").lower()
+    if username:
+        return re.sub(r"[^a-z0-9_.-]+", "-", username)
+    token = getattr(cfg, "token", "") or ""
+    if not token:
+        return "default"
+    return "bot-" + hashlib.sha256(token.encode("utf-8")).hexdigest()[:12]
+
+
+def _state_dir(cfg=None) -> Path:
+    """Adresář se stavem bridge.
+
+    Výchozí cesta je od v2 oddělená PODLE BOTA. Dřív byla společná, takže dva bridge
+    spuštěné bez `AGENT2TELEGRAM_STATE` sdílely soubor s offsetem – jeden pak četl cizí
+    pozici ve frontě a přeskakoval vlastní zprávy (incident 30. 7. 2026). Ruční start
+    bez proměnné prostředí je běžný a nesmí končit tímhle.
+
+    Explicitně nastavená `AGENT2TELEGRAM_STATE` má dál přednost a používá se beze změny:
+    keepalive ji každému bridgi nastavuje zvlášť a měnit pod běžícím provozem cesty ke
+    stavu by znamenalo zahodit offset. Souběh dvou procesů nad jedním adresářem hlídá
+    zámek (`compat.single_instance_lock`), takže kolize je ošetřená z obou stran.
+    """
+    env = os.environ.get("AGENT2TELEGRAM_STATE")
+    if env:
+        return Path(env).expanduser()
+    base = Path.home() / ".local" / "state" / "agent2telegram"
+    return base / bot_slug(cfg) if cfg is not None else base
 
 
 def config_path() -> Path:
