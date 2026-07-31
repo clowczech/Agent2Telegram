@@ -219,7 +219,25 @@ def main() -> int:
         r.append("- prohlédnu si detaily v logu")
     else:
         r.append("- nic, jen sleduju dál")
-    print("\n".join(r))
+    print("\n".join(_uprav_odrazky(r)))
+
+
+def _uprav_odrazky(radky: list[str]) -> list[str]:
+    """Každá odrážka velkým písmenem a s tečkou na konci (Petrovo zadání).
+
+    Dělá se to tady jednou pro všechny řádky, ne ručně u každého – jinak by to dřív nebo
+    později někde uteklo a formát by nesedel.
+    """
+    hotovo = []
+    for radek in radky:
+        if radek.startswith("- ") and len(radek) > 2:
+            text = radek[2:]
+            text = text[0].upper() + text[1:]
+            if text[-1] not in ".!?:":
+                text += "."
+            radek = "- " + text
+        hotovo.append(radek)
+    return hotovo
     return 0
 
 
