@@ -633,3 +633,38 @@ class SingleOutboxConsumerTests(unittest.TestCase):
 
             self.assertEqual(b.tg.sent, ["pošli jednou"])
             self.assertIsNone(b._ensure_outbox().head())
+
+
+class DurableTurnCoverageTests(unittest.TestCase):
+    def test_durable_enqueue_prevents_a_duplicate_backstop_record(self):
+        """Uložená odpověď už kryje turn, i když Telegram zatím není dostupný."""
+        with tempfile.TemporaryDirectory() as td:
+            b = _bridge(td)
+            b._turn_active.set()
+            b._turn_from_tg = True
+            b._turn_text_sent = False
+            b._transcript = Path(td) / "transcript.jsonl"
+            b._last_assistant_text = lambda: "jedna odpověď"
+
+            b._send_final("jedna odpověď", key="answer-key")
+            self.assertTrue(b._turn_text_sent, "durable odpověď se nepočítá jako pokrytý turn")
+
+            b._finish_turn()
+
+            pending = b._ensure_outbox().pending()
+            self.assertEqual(len(pending), 1, "backstop enqueueoval druhou kopii uložené odpovědi")
+            self.assertEqual(pending[0].key, "answer-key")
+
+    def test_non_turn_notification_never_suppresses_the_backstop(self):
+        """Technická zpráva s turn_text=False nesmí ani po odeslání uzavřít turn."""
+        with tempfile.TemporaryDirectory() as td:
+            b = _bridge(td)
+            b._turn_text_sent = False
+
+            b._send_final("technické upozornění", turn_text=False)
+            self.assertFalse(b._turn_text_sent)
+
+            b._flush_pending()
+
+            self.assertEqual(b.tg.sent, ["technické upozornění"])
+            self.assertFalse(b._turn_text_sent, "technická zpráva neprávem potlačila backstop")

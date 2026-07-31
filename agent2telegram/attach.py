@@ -625,6 +625,8 @@ class AttachBridge:
             item["turn_text"] = False
         self._pending_send.append(item)
         self._persist_queue()
+        if turn_text:
+            self._turn_text_sent = True
 
     def _send_final(self, text: str, key: str | None = None, *, turn_text: bool = True) -> None:
         """Forward one reply RELIABLY. Marks the dedup ledger only AFTER a confirmed send; on any
@@ -656,13 +658,15 @@ class AttachBridge:
             chunks = split_message(text) if text else []
             soubory = list(getattr(self, "_pending_files", []) or [])
             try:
-                rid = outbox.enqueue(chunks, soubory, key)
+                outbox.enqueue(chunks, soubory, key)
             except Exception as e:
                 log.error("odchozí zprávu se nepodařilo uložit, jedu starou cestou: %s", e)
             else:
                 self._pending_files = []
                 if turn_text:
-                    self._outbox_turn_text.add(rid)
+                    # Pro backstop je odpověď vyřízená už durable uložením.
+                    # Čekat na Telegram by při výpadku vytvořilo druhý stejný record.
+                    self._turn_text_sent = True
                 return
 
         if self._pending_send:                       # something already waiting → keep FIFO order
@@ -695,8 +699,6 @@ class AttachBridge:
                 log.error("durable outbox se nepodařilo otevřít: %s", e)
                 outbox = None
             self._outbox = outbox
-            if not hasattr(self, "_outbox_turn_text"):
-                self._outbox_turn_text = set()
         return outbox
 
     def _flush_pending(self) -> None:
@@ -746,11 +748,6 @@ class AttachBridge:
             if rec.key:
                 self._mark_sent(rec.key)
             outbox.done(rec.record_id)
-            if rec.record_id in getattr(self, "_outbox_turn_text", set()):
-                self._turn_text_sent = True
-                self._outbox_turn_text.discard(rec.record_id)
-            else:
-                self._turn_text_sent = True
             log.info("FWD (doručeno) %d částí, %d příloh",
                      len(rec.chunks), len(rec.files))
 
@@ -765,8 +762,6 @@ class AttachBridge:
             self._persist_queue()
             if item.get("key"):
                 self._mark_sent(item["key"])
-            if item.get("turn_text", True):
-                self._turn_text_sent = True
             log.info("FWD (re-delivered) %r", str(item.get("text", ""))[:30])
 
     # ---- inbound (Telegram → session) -------------------------------------
