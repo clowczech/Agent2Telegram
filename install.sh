@@ -104,7 +104,7 @@ esac
 # When invoked as `curl … | bash`, this script's stdin is the pipe, not your keyboard,
 # so the interactive wizard must read from the controlling terminal (/dev/tty).
 say "Run it later with:  $HOW run"
-if [ -e /dev/tty ]; then
+if [ -e /dev/tty ] && (: </dev/tty) 2>/dev/null; then
   say "Starting setup…"
   exec "${RUN[@]}" setup </dev/tty
 else

@@ -40,5 +40,24 @@ class PreflightTests(unittest.TestCase):
         )
 
 
+class TtyGuardTests(unittest.TestCase):
+    def test_no_usable_tty_takes_the_fallback_branch(self):
+        """The old guard `[ -e /dev/tty ]` only checked EXISTENCE, so on a host where
+        /dev/tty exists but can't be opened (pipe, many containers, `… </dev/null`) the
+        installer ran `exec … setup </dev/tty`, which failed and made a SUCCESSFUL install
+        report an error (exit 1). The fix also checks OPENABILITY, so it falls back to the
+        printed instructions instead. Here stdin is /dev/null → no usable tty → fallback."""
+        r = subprocess.run(
+            ["bash", "-c",
+             '[ -e /dev/tty ] && (: </dev/tty) 2>/dev/null && echo TTY || echo FALLBACK'],
+            stdin=subprocess.DEVNULL, capture_output=True, text=True,
+        )
+        self.assertEqual(r.stdout.strip(), "FALLBACK")
+
+    def test_install_sh_uses_openability_not_just_existence(self):
+        self.assertIn("(: </dev/tty)", INSTALL.read_text(),
+                      "the /dev/tty branch must test openability, not just existence")
+
+
 if __name__ == "__main__":
     unittest.main()
