@@ -65,3 +65,31 @@ bylo v červnu záměrné, dokumentace se neaktualizovala.
 
 **Co to příště chytne:** když se chování vypne, musí ve stejném commitu zmizet i slib o něm.
 Mrtvý kód se maže, ne komentuje – jinak se z něj po měsících stane dokumentace.
+
+---
+
+## 2026-07-31 · Oprava ucpané fronty vyrobila tichou ztrátu
+
+**Co se stalo:** oprava „vadná příloha nesmí ucpat frontu" po vyčerpání pokusů volala
+`mark_file_sent` – tedy zapsala do vlastní evidence, že příloha dorazila, ačkoli nedorazila.
+Řešila jsem jeden způsob selhání a vyrobila jiný, horší.
+
+**Proč to prošlo:** testy ověřovaly, že fronta pokračuje, ale ne **za jakou cenu**. Zelené byly.
+
+**Škoda:** žádná, nasazení ještě neproběhlo. Našel Sol ve třetí revizi.
+
+**Co to příště chytne:** u každé opravy typu „nesmí to zablokovat" musí být i tvrzení, **co se
+stalo s tím, co jsme přeskočili**. Přeskočit smí jen věc, která je někde dohledatelně uložená.
+Test teď kontroluje dead-letter i to, že vzdaná příloha není vedená mezi odeslanými.
+
+---
+
+## 2026-07-31 · Mutační skript smazal rozdělanou opravu
+
+**Co se stalo:** `mutace2.sh` vrací soubory přes `git checkout --`. Pustila jsem ho na
+NEcommitnutém stavu, takže mi čerstvou opravu přepsal poslední commit.
+
+**Škoda:** pár minut práce; oprava se dala napsat znovu z kontextu.
+
+**Co to příště chytne:** mutační kontrola patří **až za commit**, nikdy před něj. Doplnit do
+checklistu; ideálně ať skript sám odmítne běžet, když `git status` není čistý.
