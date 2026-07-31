@@ -711,3 +711,38 @@ class NoSignalOutboxTests(unittest.TestCase):
                     os.environ.pop("AGENT2TELEGRAM_STATE", None)
                 else:
                     os.environ["AGENT2TELEGRAM_STATE"] = old_state
+
+
+class InstanceLockWiringTests(unittest.TestCase):
+    """Zámek musí držet v PRODUKČNÍ cestě, ne jen jako pomocná funkce.
+
+    Sol na to upozornil už v prvním kole: test, který ověří helper, netvrdí nic o tom, že se
+    ten helper vůbec volá. Přesně tak 31. 7. vznikla situace, kdy byl zámek napsaný,
+    otestovaný a hlášený jako hotový – a nikde se nevolal. Mutační kontrola to odhalila,
+    protože vyřazení `with self._instance_lock()` neshodilo jediný test.
+    """
+
+    def test_bridge_refuses_second_instance_over_same_state(self):
+        with tempfile.TemporaryDirectory() as td:
+            prvni, druha = _bridge(td), _bridge(td)
+            drzi, pusti = threading.Event(), threading.Event()
+
+            def _drz():
+                with prvni._instance_lock():
+                    drzi.set()
+                    pusti.wait(5)
+
+            t = threading.Thread(target=_drz, daemon=True)
+            t.start()
+            self.assertTrue(drzi.wait(5), "první instance zámek nezískala – špatný test")
+            try:
+                with self.assertRaises(RuntimeError):
+                    with druha._instance_lock():
+                        self.fail("druhá instance nad stejným stavem se neměla spustit")
+            finally:
+                pusti.set()
+                t.join(timeout=3)
+
+            # po uvolnění musí jít vzít znovu, jinak by se bridge po restartu nezvedl
+            with druha._instance_lock():
+                pass
