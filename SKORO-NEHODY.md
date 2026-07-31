@@ -93,3 +93,21 @@ NEcommitnutém stavu, takže mi čerstvou opravu přepsal poslední commit.
 
 **Co to příště chytne:** mutační kontrola patří **až za commit**, nikdy před něj. Doplnit do
 checklistu; ideálně ať skript sám odmítne běžet, když `git status` není čistý.
+
+---
+
+## 2026-07-31 · Test rollbacku vypadal jako výpadek
+
+**Co se stalo:** při plánovaném testu návratu na starou verzi byl bridge minutu dole. Petr mezitím
+napsal „Je tam chyba!! Nereagujes" – z jeho strany k nerozeznání od skutečného výpadku.
+
+**Proč:** varování znělo „na chvíli mi možná vypadne odpověď". To je příliš měkké. Chybělo
+konkrétní číslo a jistota.
+
+**Škoda:** žádná technická, ale zbytečné leknutí – u nástroje, jehož celý smysl je „nikdy nemlčet",
+je to horší, než to vypadá.
+
+**Co to příště chytne:** před KAŽDÝM zásahem, který přeruší doručování, poslat předem zprávu
+s konkrétní dobou („bude ticho asi minutu, je to plánované, ozvu se hned potom"). A pokud možno
+poslat ji cestou, která přeruší nebude – tedy `notify_petr.sh` z pozadí, ne z turnu, který se
+zásahem skončí.
