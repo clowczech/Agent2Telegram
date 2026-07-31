@@ -159,56 +159,66 @@ def main() -> int:
     problem = (dl_pocet or v["vzdane_prilohy"] or v["inject_selhal"] or sti
                or v["restarty"] > 2)
 
-    # Formát je ZÁMĚRNĚ bez tabulek: Telegram je nezobrazuje a rozsypou se do kaše.
-    # A hlavně: tohle je pracovní nástroj pro mě, ne výpis čísel pro Petra – proto na konci
-    # vždycky stojí, co s tím udělám. (Petr 2026-07-31)
+    # Formát: NADPIS s emoji, dvojtečka, pod tím odrážky (Petr 2026-07-31). Žádné tabulky –
+    # v Telegramu se rozsypou. A hlavně: rozbor je pracovní nástroj pro mě, ne výpis čísel
+    # pro Petra, proto sekce "Co s tím" na konci.
     ztraty = dl_pocet + v["vzdane_prilohy"]
     r = []
-    if problem:
-        r.append("🔴 Něco k řešení")
-    else:
-        r.append("🟢 Čistý den, nic se neztratilo")
-    r.append("")
-    r.append(f"Zpráv: {v['odpovedi']} · restartů: {v['restarty']}")
 
     if ztraty:
-        r.append("")
-        r.append(f"❌ NEDORUČENO: {ztraty}")
+        r.append("❌ Ztracené zprávy:")
         if dl_pocet:
-            r.append(f"   • {dl_pocet} v odkladišti")
+            r.append(f"- {dl_pocet} v odkladišti")
         if v["vzdane_prilohy"]:
-            r.append(f"   • {v['vzdane_prilohy']} vzdaných příloh")
-    if v["inject_selhal"]:
-        zachraneno = v["inject_po_opakovani"]
+            r.append(f"- {v['vzdane_prilohy']} vzdaných příloh")
         r.append("")
-        r.append(f"⚠️ Nešlo zapsat do okna: {v['inject_selhal']}×"
-                 + (f", z toho {zachraneno}× zachránilo opakování" if zachraneno else ""))
-    if v["backstop"]:
-        r.append(f"⚠️ Pojistka musela zaskočit: {v['backstop']}×")
+    else:
+        r.append("✅ Bez ztrát:")
+        r.append("- žádná zpráva se neztratila")
+        r.append("- odkladiště prázdné")
+        r.append("")
 
-    r.append("")
-    r.append(f"Odezva: obvykle {v.get('median_turn', 0):.0f} s, nejhorší {v['nejdelsi_turn']:.0f} s")
+    r.append("📊 Provoz:")
+    r.append(f"- {v['odpovedi']} zpráv, {v['restarty']} restartů")
+    r.append(f"- odezva obvykle {v.get('median_turn', 0):.0f} s")
+    r.append(f"- nejhorší případ {v['nejdelsi_turn']:.0f} s")
     if v["sit_vypadky"]:
-        r.append(f"Výpadků sítě: {v['sit_vypadky']} (bridge je přežil)")
+        r.append(f"- {v['sit_vypadky']} výpadků sítě, všechny přežity")
+    r.append("")
+
+    potize = []
+    if v["inject_selhal"]:
+        z = v["inject_po_opakovani"]
+        potize.append(f"- {v['inject_selhal']}× nešlo zapsat do okna"
+                      + (f" ({z}× zachránilo opakování)" if z else " (opakování nepomohlo)"))
+    if v["backstop"]:
+        potize.append(f"- {v['backstop']}× musela zaskočit pojistka")
+    if v["duplicity_fronta"]:
+        potize.append(f"- {v['duplicity_fronta']}× se opakovaně nedařilo odeslat")
+    if potize:
+        r.append("⚠️ Drhlo:")
+        r.extend(potize)
+        r.append("")
 
     if sti:
+        r.append("🔔 Tys hlásil problém:")
+        r.append(f"- {len(sti)}× jsi psal, že něco nedorazilo")
+        r.append("- to má přednost před vším ostatním")
         r.append("")
-        r.append(f"🔔 {len(sti)}× jsi hlásil, že něco nedorazilo – to má přednost před vším ostatním")
 
-    # Co s tím – tohle je jádro celého rozboru
-    r.append("")
+    r.append("🔧 Co s tím:")
     if ztraty:
-        r.append("→ Jdu se podívat na ty nedoručené a najít příčinu.")
+        r.append("- jdu najít příčinu těch nedoručených")
     elif sti:
-        r.append("→ Projdu, co se dělo v tu chvíli, cos psal.")
+        r.append("- projdu, co se dělo v tu chvíli, cos psal")
     elif v["inject_selhal"] and not v["inject_po_opakovani"]:
-        r.append("→ Zápis do okna selhává a opakování nepomáhá. Podívám se na to.")
+        r.append("- zápis do okna selhává a opakování nepomáhá, podívám se na to")
     elif v["restarty"] > 2:
-        r.append(f"→ {v['restarty']} restartů je moc, zjistím proč.")
+        r.append(f"- {v['restarty']} restartů je moc, zjistím proč")
     elif problem:
-        r.append("→ Prohlédnu si detaily v logu.")
+        r.append("- prohlédnu si detaily v logu")
     else:
-        r.append("→ Nic nedělám, jen sleduju dál.")
+        r.append("- nic, jen sleduju dál")
     print("\n".join(r))
     return 0
 
