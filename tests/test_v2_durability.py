@@ -344,8 +344,9 @@ class ChunkRedeliveryTests(unittest.TestCase):
             long_text = "\n".join(f"radek {i}" for i in range(3000))
             self.assertGreater(len(split_message(long_text)), 1, "text musí být dělený")
 
-            b._send_final(long_text)          # 1. chunk projde, 2. spadne → do fronty
-            b._flush_pending()                # síť zotavená → doposlat
+            b._send_final(long_text)          # pouze durable enqueue
+            b._flush_pending()                # při mutaci: 1. chunk projde, 2. spadne
+            b._flush_pending()                # síť zotavená → doposlat zbytek
 
             first = split_message(long_text)[0]
             self.assertEqual(
