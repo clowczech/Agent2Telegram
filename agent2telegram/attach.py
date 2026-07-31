@@ -50,6 +50,9 @@ INBOUND_MAX_ATTEMPTS = 5
 # Kolikrát se opakuje odchozí příloha, než se vzdá. Bez stropu by jedna vadná příloha
 # držela hlavu FIFO fronty navždy a zablokovala všechny další odpovědi.
 OUTBOX_MAX_ATTEMPTS = 3
+# Jak často se za BĚHU zkusí znovu doručit zpráva, která zůstala v trvalém úložišti.
+# Bez toho se čekalo na restart – u služby běžící týdny prakticky navždy (revize Sol #1).
+INBOUND_RETRY_INTERVAL = 30.0
 #: How often we re-assert the "typing…" chat action (Telegram shows it for ~5s). Kept well
 #: under that window so a turn never shows a gap, even right after a sent message clears it.
 TYPING_INTERVAL = 1.5
@@ -792,7 +795,16 @@ class AttachBridge:
 
     def _submit_inbound_update(self, upd: dict, record_id: str | None = None) -> None:
         self._start_inbound_worker()
+        if record_id:
+            self._inbound_inflight().add(record_id)
         self._inbound_queue.put((upd, record_id))
+
+    def _inbound_inflight(self) -> set:
+        """Záznamy právě rozpracované ve frontě v paměti. Bez téhle evidence by
+        opakovaný pokus zařadil tutéž zprávu podruhé a Petr by ji dostal dvakrát."""
+        if not hasattr(self, "_inflight_ids"):
+            self._inflight_ids = set()
+        return self._inflight_ids
 
     def _replay_pending_inbound(self) -> int:
         """Po startu doručí zprávy, které zbyly v trvalém úložišti.
@@ -809,6 +821,8 @@ class AttachBridge:
         except Exception as e:
             log.error("nepodařilo se přečíst zbylé příchozí zprávy: %s", e)
             return 0
+        rozpracovane = self._inbound_inflight()
+        cekajici = [r for r in cekajici if r.record_id not in rozpracovane]
         for rec in cekajici:
             self._submit_inbound_update(rec.update, rec.record_id)
         if cekajici:
@@ -843,6 +857,7 @@ class AttachBridge:
                 self._inbound_queue.task_done()
 
     def _inbound_done(self, record_id: str | None) -> None:
+        self._inbound_inflight().discard(record_id)
         inbox = getattr(self, "_inbox", None)
         if record_id and inbox is not None:
             try:
@@ -853,6 +868,7 @@ class AttachBridge:
     def _inbound_failed(self, record_id: str | None, duvod: str) -> None:
         """Nedoručeno → záznam zůstává a zkusí se znovu. Po vyčerpání pokusů jde do
         dead-letter, ať zpráva nezmizí bez stopy ani v beznadějném případě."""
+        self._inbound_inflight().discard(record_id)
         inbox = getattr(self, "_inbox", None)
         if not record_id or inbox is None:
             return
@@ -1303,6 +1319,11 @@ class AttachBridge:
                     log.warning("konec turnu podle ticha (%.0f s bez aktivity), hook se neozval",
                                 IDLE_DONE)
                     self._end_turn()
+                # Živý retry: zprávy, které se nepodařilo doručit, se zkoušejí i za běhu.
+                # Replay jen při startu znamenal u dlouho běžící služby čekání donekonečna.
+                if time.monotonic() - getattr(self, "_last_inbound_retry", 0.0) > INBOUND_RETRY_INTERVAL:
+                    self._last_inbound_retry = time.monotonic()
+                    self._replay_pending_inbound()
                 self._beat()                  # reached only on a full, non-blocking forward cycle
             except Exception as e:
                 log.error("outbound error: %s", e)

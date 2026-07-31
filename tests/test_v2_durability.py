@@ -516,3 +516,69 @@ class OutboxBlockingTests(unittest.TestCase):
 
             self.assertEqual([Path(p).resolve() for p in client.files], [payload.resolve()],
                              "příloha bez textu se po výpadku sítě ztratila")
+
+
+class LiveRetryTests(unittest.TestCase):
+    def test_undelivered_message_is_retried_without_a_restart(self):
+        """Nedoručená zpráva se musí zkusit znovu ZA BĚHU, ne až po restartu.
+
+        Revize Sol #1 / Fable F1: doručení uložených zpráv bylo jen ve startovní cestě.
+        U služby, která běží týdny, to znamená „prakticky nikdy" – zpráva by čekala
+        na nejbližší pád nebo update.
+        """
+        with tempfile.TemporaryDirectory() as td:
+            class _NejdrivMrtva:
+                """tmux, který se po chvíli probere – jako když zamrzlé okno zase naskočí."""
+                def __init__(self):
+                    self.injected = []
+                    self.ziva = False
+
+                def inject(self, text):
+                    if not self.ziva:
+                        raise SessionError("tmux send-keys timed out")
+                    self.injected.append(text)
+
+            session = _NejdrivMrtva()
+            b = _bridge(td, session=session)
+            b._ensure_inbound_worker_state()
+
+            b._handle_update_once(_msg(5000, "doruč mě později"), 5000)
+            for _ in range(60):
+                if not b._inbound_inflight():
+                    break
+                time.sleep(0.02)
+            self.assertFalse(session.injected, "zpráva se neměla doručit – tmux byl mrtvý")
+            self.assertTrue(list(Path(td).glob("inbox/*")), "zpráva se neuložila k opakování")
+
+            session.ziva = True          # okno se probralo, BEZ restartu bridge
+            b._replay_pending_inbound()
+            for _ in range(100):
+                if session.injected:
+                    break
+                time.sleep(0.02)
+            b._stop.set()
+            time.sleep(0.3)
+
+            self.assertTrue(session.injected, "zpráva se za běhu nikdy nezkusila znovu")
+            self.assertIn("doruč mě později", "\n".join(session.injected))
+
+    def test_live_retry_does_not_deliver_the_same_message_twice(self):
+        """Opakování nesmí zařadit tutéž zprávu podruhé, dokud se zpracovává."""
+        with tempfile.TemporaryDirectory() as td:
+            session = _OkSession()
+            b = _bridge(td, session=session)
+            b._ensure_inbound_worker_state()
+            b._handle_update_once(_msg(6000, "jen jednou"), 6000)
+            for _ in range(5):
+                b._replay_pending_inbound()      # opakované cykly outbound smyčky
+            for _ in range(100):
+                if session.injected:
+                    break
+                time.sleep(0.02)
+            b._stop.set()
+            time.sleep(0.4)
+
+            self.assertEqual(
+                "\n".join(session.injected).count("jen jednou"), 1,
+                "zpráva se doručila víckrát – opakování nehlídá rozpracované záznamy",
+            )
