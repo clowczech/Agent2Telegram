@@ -37,6 +37,10 @@ log = logging.getLogger("agent2telegram.attach")
 #: the Stop-hook turn-end marker never arrives. The marker is the primary, precise signal —
 #: this just stops "typing…" from hanging forever if the hook is missing/misconfigured.
 IDLE_DONE = 90.0
+# Zápis do tmuxu selhává i přechodně (zaneprázdněné okno, plný buffer), tak se opakuje.
+# Krátká pauza záměrně: zpráva od uživatele nesmí čekat déle, než kolik trvá jeho trpělivost.
+INJECT_ATTEMPTS = 3
+INJECT_RETRY_WAIT = 1.5
 #: How often we re-assert the "typing…" chat action (Telegram shows it for ~5s). Kept well
 #: under that window so a turn never shows a gap, even right after a sent message clears it.
 TYPING_INTERVAL = 1.5
@@ -766,21 +770,59 @@ class AttachBridge:
         log.info("TURN START t=%.2f", time.time())
 
     def _inject(self, text: str) -> bool:
+        """Doručí zprávu do session. Selhání NIKDY nesmí být tiché.
+
+        Dřív se selhaný zápis do tmuxu jen zalogoval a zpráva zmizela – uživatel se
+        nedozvěděl nic. Doloženo z provozu 31. 7.:
+            19:04:41 ERROR inject failed: '[TG] Jsi tam tedy?' timed out after 10 seconds
+        Petr tu zprávu poslal a odpovědi se nedočkal; nikde po ní nezůstala stopa.
+
+        Zápis do tmuxu selhává i přechodně (zaneprázdněné okno, plný buffer), proto se
+        opakuje. Když ani opakování nepomůže, uživatel se to musí dozvědět.
+        """
         self._turn_active.set()
         self._last_activity = time.monotonic()   # keep typing lit from the very start
+        posledni_chyba: Exception | None = None
+        for pokus in range(1, INJECT_ATTEMPTS + 1):
+            try:
+                self._session.inject(text)
+                if pokus > 1:
+                    log.info("inject prošel až na %d. pokus", pokus)
+                return True
+            except SessionError as e:
+                posledni_chyba = e
+                if "refusing to inject" in str(e):
+                    # Pane neběží očekávaný agent – opakování nepomůže, jen by zdrželo.
+                    log.error("inject failed: %s", e)
+                    self._turn_active.clear()
+                    self._notify_unsafe_pane(str(e))
+                    return False
+            except Exception as e:
+                posledni_chyba = e
+            if pokus < INJECT_ATTEMPTS:
+                self._stop.wait(INJECT_RETRY_WAIT)
+        log.error("inject failed po %d pokusech: %s", INJECT_ATTEMPTS, posledni_chyba)
+        self._turn_active.clear()
+        self._notify_inject_failed(text, str(posledni_chyba))
+        return False
+
+    def _notify_inject_failed(self, text: str, reason: str) -> None:
+        """Řekne majiteli, že jeho zpráva nedošla – radši dvakrát než nikdy."""
+        if not self._owner_chat:
+            return
+        nahled = text.strip().replace("\n", " ")
+        if len(nahled) > 80:
+            nahled = nahled[:80] + "…"
         try:
-            self._session.inject(text)
-            return True
-        except SessionError as e:
-            log.error("inject failed: %s", e)
-            self._turn_active.clear()
-            if "refusing to inject" in str(e):
-                self._notify_unsafe_pane(str(e))
-            return False
+            self.tg.send_message(
+                self._owner_chat,
+                "⚠️ Couldn't deliver your message to the agent session — the write to tmux "
+                f"failed after {INJECT_ATTEMPTS} attempts.\n\n"
+                f"Message: {nahled}\n{reason}\n\n"
+                "The agent may be frozen. Check the tmux pane, then send it again.",
+            )
         except Exception as e:
-            log.error("inject failed: %s", e)
-            self._turn_active.clear()
-            return False
+            log.warning("inject-failure notification failed: %s", e)
 
     def _notify_unsafe_pane(self, reason: str) -> None:
         if not self._owner_chat:
