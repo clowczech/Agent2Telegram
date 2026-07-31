@@ -851,7 +851,7 @@ class QueuedAckTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             b = self._bridge_v_praci(td)
             b._handle_update_once(_msg(9001, "ještě jedna věc"), 9001)
-            self.assertTrue(any("Mám tvoji zprávu" in s for s in b.tg.sent),
+            self.assertTrue(any("Got your message" in s for s in b.tg.sent),
                             "zpráva během práce se nepotvrdila – uživatel neví, že dorazila")
 
     def test_five_messages_produce_one_ack_not_five(self):
@@ -859,7 +859,7 @@ class QueuedAckTests(unittest.TestCase):
             b = self._bridge_v_praci(td)
             for i in range(5):
                 b._handle_update_once(_msg(9100 + i, f"zpráva {i}"), 9100 + i)
-            potvrzeni = [s for s in b.tg.sent if "Mám tvoji zprávu" in s]
+            potvrzeni = [s for s in b.tg.sent if "Got your message" in s]
             self.assertEqual(len(potvrzeni), 1,
                              f"přišlo {len(potvrzeni)} potvrzení místo jednoho – spam")
 
@@ -869,5 +869,5 @@ class QueuedAckTests(unittest.TestCase):
             b._turn_active.clear()    # nic neběží → odpověď přijde rovnou, potvrzení je zbytečné
             b._last_queue_ack = 0.0
             b._handle_update_once(_msg(9200, "ahoj"), 9200)
-            self.assertFalse(any("Mám tvoji zprávu" in s for s in b.tg.sent),
+            self.assertFalse(any("Got your message" in s for s in b.tg.sent),
                              "potvrzení se posílá i když nic neběží – zbytečný šum")

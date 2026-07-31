@@ -1015,7 +1015,13 @@ class AttachBridge:
         return True
 
     def _maybe_ack_queued(self, upd: dict) -> None:
-        """Potvrdí příjem zprávy, která přišla během rozdělané práce."""
+        """Potvrdí příjem zprávy, která přišla během rozdělané práce.
+
+        Text hlášky je ANGLICKY, i když spolu s Petrem mluvíme česky: tuhle zprávu píše
+        bridge sám, ne agent, a bridge je nástroj pro kohokoli (Petr ho instaluje lidem
+        na webináři). Odpovědi agenta jazyk konverzace samozřejmě drží – tohle je jediné
+        místo, kde mluví samotný nástroj.
+        """
         if not self._turn_active.is_set():
             log.debug("ACK nezaslán: žádný turn neběží")
             return
@@ -1030,8 +1036,8 @@ class AttachBridge:
             return
         self._last_queue_ack = ted
         try:
-            self.tg.send_message(chat_id, "⚡ Mám tvoji zprávu – dodělám rozdělanou věc "
-                                          "a hned se jí budu věnovat.")
+            self.tg.send_message(chat_id, "⚡ Got your message. I'll get to it as soon as "
+                                          "I finish what I'm on.")
             # Logovat MUSÍ: bez záznamu nejde po incidentu zjistit, jestli potvrzení odešlo.
             # 31. 7. jsem kvůli tomu nedokázala rozhodnout, jestli feature funguje.
             log.info("ACK příjmu odeslán (běží jiný turn)")
