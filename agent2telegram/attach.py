@@ -695,8 +695,14 @@ class AttachBridge:
         if outbox is None:
             queue_path = getattr(self, "_queue_path", None)
             root = Path(queue_path).parent if queue_path is not None else _state_dir(self.cfg)
+            # VLASTNÍ podadresář, ne kořen stavu. DurableOutbox si pod předaným kořenem zakládá
+            # složku "outbox" – jenže `<state>/outbox` je zároveň složka, ze které se posílají
+            # uživatelské přílohy (Config.path_outbox). Leželo tam 5,7 MB Petrových souborů.
+            # Bez tohohle oddělení by je fronta počítala do své kvóty, cizí .json by přesunula
+            # do dead-letter a po 90 dnech smazala. Našel Sol při finální kontrole – jediný
+            # destruktivní nález celého dne, a to těsně před přepnutím.
             try:
-                outbox = DurableOutbox(root)
+                outbox = DurableOutbox(root / "queue")
             except Exception as e:                     # doručování se nesmí zastavit
                 log.error("durable outbox se nepodařilo otevřít: %s", e)
                 outbox = None

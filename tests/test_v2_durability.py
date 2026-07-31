@@ -481,7 +481,8 @@ class OutboxBlockingTests(unittest.TestCase):
             # Vzdaná příloha NESMÍ skončit zapsaná jako doručená – to by byla tichá ztráta
             # v naší vlastní evidenci (regrese, kterou našel Sol ve třetím kole).
             # Patří do dead-letter, kde je dohledatelná.
-            dead = list((Path(td) / "dead-letter").rglob("*.json"))
+            # Fronta má od opravy kolize vlastní podadresář "queue" (viz OutboxDirCollisionTests).
+            dead = list((Path(td) / "queue" / "dead-letter").rglob("*.json"))
             self.assertTrue(dead, "vzdaná příloha se neuložila do dead-letter")
             self.assertNotIn(str(velky), [str(p) for p in client.files],
                              "příloha se nikdy neodeslala, takže nesmí být vedená jako odeslaná")
@@ -767,3 +768,33 @@ class InstanceLockWiringTests(unittest.TestCase):
             b._run_locked = lambda: None
             b.run()
             self.assertTrue(pouzito, "run() zámek vůbec nevzal – ochrana proti dvěma instancím je mrtvá")
+
+
+class OutboxDirCollisionTests(unittest.TestCase):
+    def test_durable_queue_never_touches_the_user_outbox_folder(self):
+        """Fronta si NESMÍ zabrat složku, ze které se posílají uživatelské přílohy.
+
+        Sol při finální kontrole: `DurableOutbox` si pod předaným kořenem zakládá složku
+        "outbox" – a `<state>/outbox` je zároveň místo, odkud bridge posílá soubory. Leželo
+        tam 5,7 MB Petrových nahrávek. Fronta by je počítala do své kvóty, cizí `.json`
+        přesunula do dead-letter a po 90 dnech smazala. Jediný destruktivní nález dne.
+        """
+        with tempfile.TemporaryDirectory() as td:
+            uzivatelska = Path(td) / "outbox"
+            uzivatelska.mkdir()
+            nahravka = uzivatelska / "DT224-nahravka.mp3"
+            nahravka.write_bytes(b"MP3" * 100)
+            cizi_json = uzivatelska / "muj-export.json"
+            cizi_json.write_text('{"tohle": "neni zaznam fronty"}')
+
+            b = _bridge(td)
+            b.cfg.outbox_dirs = [str(uzivatelska)]
+            outbox = b._ensure_outbox()
+            self.assertIsNotNone(outbox, "fronta se nezaložila – špatný test")
+            b._send_final("nějaká odpověď")
+            b._flush_pending()
+
+            self.assertTrue(nahravka.exists(), "fronta sáhla na uživatelskou nahrávku")
+            self.assertTrue(cizi_json.exists(), "fronta zabavila cizí .json z uživatelské složky")
+            self.assertNotIn("dead-letter", [p.name for p in uzivatelska.iterdir()],
+                             "fronta si udělala své složky v uživatelském outboxu")
