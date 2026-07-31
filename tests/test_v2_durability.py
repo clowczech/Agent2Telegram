@@ -440,3 +440,72 @@ class StateNamespaceTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# --------------------------------------------------------------------------------------
+# Druhé kolo – nálezy z křížové recenze (Fable F2, Sol #6)
+# --------------------------------------------------------------------------------------
+class OutboxBlockingTests(unittest.TestCase):
+    def test_permanently_rejected_file_does_not_block_later_replies(self):
+        """Příloha, kterou nemá smysl opakovat, nesmí ucpat FIFO frontu.
+
+        Recenze Fable F2: `send_file` hází TelegramError i pro TRVALÉ případy (soubor nad
+        50 MB, smazaný soubor, HTTP 400). Drain je bral jako přechodné a držel záznam na
+        hlavě fronty, takže se donekonečna opakoval a VŠECHNY další odpovědi Petrovi
+        nedorazily – třída „Telegram nefunguje celý den".
+        """
+        with tempfile.TemporaryDirectory() as td:
+            velky = Path(td) / "klip.mov"
+            velky.write_bytes(b"x")
+
+            class _RejectsFile(_Client):
+                def send_file(self, chat_id, path, caption=None, **kw):
+                    raise TelegramError("file is too big")
+
+            client = _RejectsFile()
+            b = _bridge(td, client=client)
+            b.cfg.file_marker = "[tg-file]"
+            b.cfg.outbox_dirs = [td]
+
+            b._send_final(f"[tg-file] {velky}")
+            b._send_final("tahle zpráva musí dorazit i tak")
+            for _ in range(6):        # strop pokusů se musí stihnout vyčerpat
+                b._flush_pending()
+
+            self.assertIn("tahle zpráva musí dorazit i tak", "\n".join(client.sent),
+                          "zaseklá příloha zablokovala všechny další odpovědi")
+            self.assertTrue(any("Couldn't send" in s for s in client.sent),
+                            "odmítnutá příloha se má ohlásit, ne tiše zmizet")
+
+    def test_file_only_reply_goes_through_the_durable_queue(self):
+        """Odpověď složená JEN z přílohy musí jít frontou jako každá jiná.
+
+        Recenze Sol #6: prázdný text posílal kód starou cestou ještě před frontou,
+        a ta smaže cestu k souboru z paměti dřív, než se upload povede. Výpadek sítě
+        pak přílohu ztratil, přestože durabilita měla být hotová.
+        """
+        with tempfile.TemporaryDirectory() as td:
+            payload = Path(td) / "vlna.png"
+            payload.write_bytes(b"PNG")
+
+            class _FailsOnce(_Client):
+                def __init__(self):
+                    super().__init__()
+                    self.armed = True
+
+                def send_file(self, chat_id, path, caption=None, **kw):
+                    if self.armed:
+                        self.armed = False
+                        raise TelegramError("connection reset by peer")
+                    self.files.append(path)
+
+            client = _FailsOnce()
+            b = _bridge(td, client=client)
+            b.cfg.file_marker = "[tg-file]"
+            b.cfg.outbox_dirs = [td]
+
+            b._send_final(f"[tg-file] {payload}")   # síť spadne
+            b._flush_pending()                       # síť zotavená → doposlat
+
+            self.assertEqual([Path(p).resolve() for p in client.files], [payload.resolve()],
+                             "příloha bez textu se po výpadku sítě ztratila")

@@ -47,6 +47,9 @@ INJECT_RETRY_WAIT = 1.5
 # Kolikrát se zkusí doručit uložená příchozí zpráva, než skončí v dead-letter.
 # Radši ji tam odložit s důvodem než ji smazat – aspoň je dohledatelná.
 INBOUND_MAX_ATTEMPTS = 5
+# Kolikrát se opakuje odchozí příloha, než se vzdá. Bez stropu by jedna vadná příloha
+# držela hlavu FIFO fronty navždy a zablokovala všechny další odpovědi.
+OUTBOX_MAX_ATTEMPTS = 3
 #: How often we re-assert the "typing…" chat action (Telegram shows it for ~5s). Kept well
 #: under that window so a turn never shows a gap, even right after a sent message clears it.
 TYPING_INTERVAL = 1.5
@@ -624,7 +627,7 @@ class AttachBridge:
         """Forward one reply RELIABLY. Marks the dedup ledger only AFTER a confirmed send; on any
         send failure the reply is queued to disk and the outbound loop keeps retrying until Telegram
         confirms. Order is preserved: if anything is already queued, this appends behind it."""
-        if not text or self._owner_chat is None:
+        if self._owner_chat is None or (not text and not getattr(self, "_pending_files", None)):
             return
         if key and key in self._sent_keys:
             return
@@ -635,7 +638,10 @@ class AttachBridge:
             text, files = self._extract_files(text)
             if files:
                 self._pending_files = getattr(self, "_pending_files", []) + files
-            if not text:
+            if not text and self._ensure_outbox() is None:
+                # Jen bez durable fronty se jde starou cestou. Dřív tudy propadla KAŽDÁ
+                # odpověď složená jen z přílohy: _flush_files smaže cestu z paměti ještě
+                # před uploadem, takže selhání sítě přílohu ztratilo (recenze Sol #6).
                 self._flush_files()
                 return
         # Durable outbox eviduje KAŽDOU ČÁST zvlášť. Dřív se při selhání vracel do fronty
@@ -711,7 +717,16 @@ class AttachBridge:
                 try:
                     self._send_one_file(cesta)
                 except Exception as e:
-                    log.warning("doručení přílohy %s stále selhává: %s", cesta, e)
+                    # Omezené opakování: bez něj by jedna vadná příloha (soubor nad limit,
+                    # smazaný soubor, HTTP 400) držela hlavu FIFO fronty navždy a Petrovi
+                    # by nedorazila ŽÁDNÁ další odpověď (Fable F2).
+                    pokusu = outbox.fail(rec.record_id, f"{cesta}: {e}")
+                    log.warning("doručení přílohy %s selhalo (%d/%d): %s",
+                                cesta, pokusu, OUTBOX_MAX_ATTEMPTS, e)
+                    if pokusu >= OUTBOX_MAX_ATTEMPTS:
+                        self._ohlas_trvale_odmitnuti(Path(cesta).name, str(e))
+                        outbox.mark_file_sent(rec.record_id, cesta)
+                        continue
                     return
                 outbox.mark_file_sent(rec.record_id, cesta)
             outbox.done(rec.record_id)
@@ -1448,14 +1463,26 @@ class AttachBridge:
         """
         resolved, reason = self._safe_outbox_path(raw)
         if resolved is None:
-            log.warning("refusing to send %r: %s", raw, reason)
-            try:
-                self.tg.send_message(self._owner_chat,
-                                     f"⚠️ Couldn't send {Path(raw).name}: {reason}")
-            except Exception as e:
-                log.warning("nešlo ohlásit odmítnutou přílohu: %s", e)
+            self._ohlas_trvale_odmitnuti(Path(raw).name, reason)
             return
-        self.tg.send_file(self._owner_chat, resolved)
+        try:
+            self.tg.send_file(self._owner_chat, resolved)
+        except OSError as e:
+            # Soubor zmizel nebo se nedá přečíst – opakováním se to nespraví.
+            self._ohlas_trvale_odmitnuti(resolved.name, str(e))
+        # Ostatní chyby (včetně TelegramError) propouštíme ven jako přechodné. Rozlišovat je
+        # binárně se ukázalo jako past: nejasnou chybu bych buď zahodila (ztráta zprávy), nebo
+        # opakovala donekonečna (ucpaná FIFO fronta blokující všechny další odpovědi – Fable F2).
+        # Místo hádání se opakuje OMEZENĚ a pak se to vzdá; počitadlo drží outbox.
+
+    def _ohlas_trvale_odmitnuti(self, jmeno: str, duvod: str) -> None:
+        """Přílohu, kterou nemá smysl zkoušet znovu, ohlásí a bere za vyřízenou.
+        Tiché zahození by bylo horší než viditelná chyba – a ucpaná fronta ještě horší."""
+        log.warning("přílohu %s neposílám: %s", jmeno, duvod)
+        try:
+            self.tg.send_message(self._owner_chat, f"⚠️ Couldn't send {jmeno}: {duvod}")
+        except Exception as e:
+            log.warning("nešlo ohlásit odmítnutou přílohu: %s", e)
 
     def _flush_files(self) -> None:
         """Upload whatever the last reply asked for. Kept separate from the text path so a
