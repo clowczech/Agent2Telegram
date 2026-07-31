@@ -15,12 +15,17 @@ Odškrtávat po jednom. **Když kterýkoli bod selže, jde se rovnou na ROLLBACK
 
 ## Přepnutí
 
+⚠️ **`ps` NEROZLIŠÍ starou a novou verzi** – obě mají shodné argv a obě logují `Attach bridge
+live`. Poznat je jde jen podle pracovního adresáře procesu (Sol, finální kontrola).
+
+- [ ] zapsat PID běžícího Masteru: `ps -axww -o pid=,args= | grep "config.json"`
+- [ ] ověřit jeho cwd: `/usr/sbin/lsof -a -p <PID> -d cwd` → musí být `~/Agent2Telegram` (stará)
 - [ ] `MASTER_DIR="$HOME/Agent2Telegram-v2"` v `bridge_boot.sh`
 - [ ] `bash -n bridge_boot.sh` (syntaxe)
-- [ ] ukončit běžící Master bridge → keepalive ho do minuty nahodí z nové složky
-- [ ] ověřit, že běží **právě jedna** instance a z **nové** složky:
-      `ps -axww -o pid=,args= | grep "agent2telegram run --config .*agent2telegram/config.json"`
-- [ ] v logu je `Attach bridge live` **po** čase přepnutí
+- [ ] ukončit Master bridge **podle PID**, ne podle vzoru
+- [ ] počkat, až ho keepalive nahodí (do minuty)
+- [ ] **ověřit cwd nového procesu** – teprve to dokazuje, že běží v2
+- [ ] běží **právě jedna** instance
 - [ ] offset navazuje (nezačal od nuly) – jinak hrozí smršť starých zpráv
 
 ## Ověření v provozu (ne teorií)
@@ -34,7 +39,12 @@ Odškrtávat po jednom. **Když kterýkoli bod selže, jde se rovnou na ROLLBACK
 
 ## ROLLBACK (musí být vyzkoušený DŘÍV, než ho budeme potřebovat)
 
-- [ ] `MASTER_DIR=""` v `bridge_boot.sh`
+⚠️ **Rollback není zadarmo.** Stará verze NEČTE fronty v2. Když se vrátíme se zprávou uvnitř,
+uvízne tam: Telegram ji už znovu nepošle a stará verze o ní neví (Sol, finální kontrola).
+
+- [ ] **fronty jsou prázdné**: `ls <state>/inbox/*.json <state>/queue/outbox/*.json` → nic
+- [ ] neprobíhá turn (v logu není otevřený `TURN START` bez `TURN END`)
+- [ ] teprve pak `MASTER_DIR=""` v `bridge_boot.sh`
 - [ ] ukončit Master bridge → keepalive nahodí ze stabilní složky
 - [ ] ověřit, že běží ze staré cesty a odpovídá na zprávu
 
