@@ -6,10 +6,8 @@ written with ``0600`` permissions and never logged.
 """
 from __future__ import annotations
 
-import hashlib
 import json
 import os
-import re
 import stat
 from dataclasses import dataclass, field, asdict
 from pathlib import Path
@@ -110,40 +108,27 @@ class Config:
         return d
 
 
-def bot_slug(cfg) -> str:
-    """Stabilní, NETAJNÝ identifikátor bota pro cestu ke stavu.
-
-    Token do cesty nikdy nepatří (viditelný v `ps`, v logu, v záloze), takže se z něj
-    bere jen krátký otisk. Když je známé @username, použije se – je čitelné pro člověka,
-    který se přijde podívat, co v adresáři leží.
-    """
-    username = (getattr(cfg, "bot_username", "") or "").strip().lstrip("@").lower()
-    if username:
-        return re.sub(r"[^a-z0-9_.-]+", "-", username)
-    token = getattr(cfg, "token", "") or ""
-    if not token:
-        return "default"
-    return "bot-" + hashlib.sha256(token.encode("utf-8")).hexdigest()[:12]
-
-
 def _state_dir(cfg=None) -> Path:
-    """Adresář se stavem bridge.
+    """Adresář se stavem bridge. Výchozí cesta je ZÁMĚRNĚ společná.
 
-    Výchozí cesta je od v2 oddělená PODLE BOTA. Dřív byla společná, takže dva bridge
-    spuštěné bez `AGENT2TELEGRAM_STATE` sdílely soubor s offsetem – jeden pak četl cizí
-    pozici ve frontě a přeskakoval vlastní zprávy (incident 30. 7. 2026). Ruční start
-    bez proměnné prostředí je běžný a nesmí končit tímhle.
+    Souběh dvou instancí nad jedním adresářem hlídá single-instance zámek
+    (`compat.single_instance_lock`, viz `AttachBridge._instance_lock`): druhá instance
+    skončí jasnou hláškou s odkazem na `AGENT2TELEGRAM_STATE`, ne tichým sdílením offsetu.
+    Explicitně nastavená `AGENT2TELEGRAM_STATE` má přednost – keepalive ji nastavuje
+    každému bridgi zvlášť.
 
-    Explicitně nastavená `AGENT2TELEGRAM_STATE` má dál přednost a používá se beze změny:
-    keepalive ji každému bridgi nastavuje zvlášť a měnit pod běžícím provozem cesty ke
-    stavu by znamenalo zahodit offset. Souběh dvou procesů nad jedním adresářem hlídá
-    zámek (`compat.single_instance_lock`), takže kolize je ošetřená z obou stran.
+    Proč NE per-bot výchozí cesta (zamítnutá oprava K): pomohla by jedině tomu, kdo běží
+    bez env a zároveň provozuje dva RŮZNÉ boty – takový nikdo není (flotila má env,
+    webinář jednoho bota) – a přitom by rozbila upgrade běžící instalace: nový prázdný
+    per-bot adresář znamená reset offsetu → replay celého backlogu z Telegramu a osiřelou
+    durable frontu ve staré cestě. Bezpečná migrace stará→nová z dat nejde (nelze určit,
+    komu společný adresář patřil). Loud-fail přes zámek je jednodušší a bezpečnější.
+    `cfg` se ponechává v signatuře kvůli volajícím, ale identitu bota už do cesty nebere.
     """
     env = os.environ.get("AGENT2TELEGRAM_STATE")
     if env:
         return Path(env).expanduser()
-    base = Path.home() / ".local" / "state" / "agent2telegram"
-    return base / bot_slug(cfg) if cfg is not None else base
+    return Path.home() / ".local" / "state" / "agent2telegram"
 
 
 def config_path() -> Path:

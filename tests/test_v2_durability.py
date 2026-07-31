@@ -402,25 +402,25 @@ class AttachmentDurabilityTests(unittest.TestCase):
 # K – stav oddělený podle bota
 # --------------------------------------------------------------------------------------
 class StateNamespaceTests(unittest.TestCase):
-    def test_two_bots_do_not_share_one_state_dir(self):
-        """Dva různí boti nesmí sdílet offset ani ledger.
+    def test_env_less_default_dir_is_shared_by_design(self):
+        """Zamítnutá oprava K: výchozí cesta je ZÁMĚRNĚ společná (viz rozhodnutí v `_state_dir`).
 
-        Dnes to drží jen proměnná prostředí nastavená v keepalivu. Kdo bridge spustí ručně,
-        dostane sdílenou cestu – přesně to jsem si 30. 7. v 17:20 nevědomky udělala sama
-        a Master pak četl cizí offset.
+        Per-bot výchozí cesta by rozbila upgrade (prázdná cesta → reset offsetu → replay
+        backlogu) a pomohla jen neexistujícímu uživateli (dva různí boti bez env). Ochranu
+        proti dvěma instancím nad společnou cestou NEDĚLÁ rozdělení adresářů, ale zámek –
+        to hlídá `test_second_process_cannot_take_the_same_state_dir` níže. Token v cestě
+        nikdy není.
         """
         old = os.environ.get("AGENT2TELEGRAM_STATE")
         os.environ.pop("AGENT2TELEGRAM_STATE", None)   # výchozí cesta, jako u ručního startu
         try:
             a = _state_dir(Config(agent="generic", token="111:AAA", tmux_session="a"))
             c = _state_dir(Config(agent="generic", token="222:BBB", tmux_session="b"))
-        except TypeError:
-            self.fail("_state_dir() nebere identitu bota – stav je společný pro všechny boty")
         finally:
             if old is not None:
                 os.environ["AGENT2TELEGRAM_STATE"] = old
 
-        self.assertNotEqual(str(a), str(c), "dva různí boti dostali stejný state dir")
+        self.assertEqual(str(a), str(c), "výchozí cesta má být společná (rozhodnutí o zamítnutí K)")
         for cesta in (str(a), str(c)):
             self.assertNotIn("111:AAA", cesta, "token nesmí být v cestě – je vidět v ps i v zálohách")
             self.assertNotIn("222:BBB", cesta)
