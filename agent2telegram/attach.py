@@ -1029,8 +1029,14 @@ class AttachBridge:
                 elif self._turn_end is not None and self._turn_end.exists():
                     self._end_turn()
                 elif self._turn_active.is_set() and time.monotonic() - self._last_activity > IDLE_DONE:
-                    self._status_clear()
-                    self._turn_active.clear()
+                    # Dřív tahle větev turn jen zavřela: backstop se nespustil, takže odpověď
+                    # se neodeslala a nezůstal po ní ani řádek v logu. Byla to jedna ze tří
+                    # cest, kterými zprávy mizely beze stopy (audit 2026-07-31, nález C).
+                    # Konec turnu teď prochází jednou společnou cestou bez ohledu na to, čím
+                    # byl vyvolán; warning odlišuje "skončilo tichem" od "ohlásil to hook".
+                    log.warning("konec turnu podle ticha (%.0f s bez aktivity), hook se neozval",
+                                IDLE_DONE)
+                    self._end_turn()
                 self._beat()                  # reached only on a full, non-blocking forward cycle
             except Exception as e:
                 log.error("outbound error: %s", e)
