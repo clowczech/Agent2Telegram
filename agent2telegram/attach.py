@@ -54,6 +54,10 @@ OUTBOX_MAX_ATTEMPTS = 3
 # Jak často se za BĚHU zkusí znovu doručit zpráva, která zůstala v trvalém úložišti.
 # Bez toho se čekalo na restart – u služby běžící týdny prakticky navždy (revize Sol #1).
 INBOUND_RETRY_INTERVAL = 30.0
+# Jak často odchozí smyčka kontroluje, jestli je co poslat. Bylo 0,4 s; zkráceno na 0,15 s,
+# protože při dlouhé práci s desítkami průběžných zpráv se to sčítalo do znatelného zpoždění.
+# Cena je častější čtení fronty – proto se to měřilo, ne odhadovalo (viz níže v commitu).
+OUTBOUND_TICK = 0.15
 #: How often we re-assert the "typing…" chat action (Telegram shows it for ~5s). Kept well
 #: under that window so a turn never shows a gap, even right after a sent message clears it.
 TYPING_INTERVAL = 1.5
@@ -1345,7 +1349,7 @@ class AttachBridge:
                 self._beat()                  # reached only on a full, non-blocking forward cycle
             except Exception as e:
                 log.error("outbound error: %s", e)
-            self._stop.wait(0.4)
+            self._stop.wait(OUTBOUND_TICK)
 
     def _beat(self) -> None:
         """Touch the outbound heartbeat — proof the forward loop completed a cycle without blocking.
