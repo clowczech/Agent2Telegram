@@ -159,33 +159,57 @@ def main() -> int:
     problem = (dl_pocet or v["vzdane_prilohy"] or v["inject_selhal"] or sti
                or v["restarty"] > 2)
 
-    print("🔴 NÁLEZY" if problem else "🟢 ČISTÝ DEN")
-    print(f"turnů {v['turnu']} · odpovědí {v['odpovedi']} · restartů bridge {v['restarty']}")
-    print()
-    print("Ztráty (každé číslo nad nulou je zpráva, která nedošla):")
-    print(f"  turnů bez odeslané odpovědi {v['turn_bez_odpovedi']}  (orientační – zahrnuje i terminálové)")
-    print(f"  nedoručené (odkladiště) {dl_pocet}")
-    print(f"  vzdané přílohy        {v['vzdane_prilohy']}")
-    print(f"  selhal zápis do okna  {v['inject_selhal']}  (z toho zachránilo opakování: {v['inject_po_opakovani']})")
-    print()
-    print("Kvalita doručení:")
-    print(f"  pojistka musela zaskočit  {v['backstop']}")
-    print(f"  fronta se opakovaně nedařila {v['duplicity_fronta']}")
-    print(f"  výpadky sítě              {v['sit_vypadky']}")
-    print()
-    print("Doba odpovědi (nezajímá průměr, ale nejhorší případy):")
-    print(f"  medián {v.get('median_turn', 0):.0f}s · 90. percentil {v.get('p90_turn', 0):.0f}s "
-          f"· nejdelší {v['nejdelsi_turn']:.0f}s · turnů nad 2 min: {v['turny_nad_2min']}")
+    # Formát je ZÁMĚRNĚ bez tabulek: Telegram je nezobrazuje a rozsypou se do kaše.
+    # A hlavně: tohle je pracovní nástroj pro mě, ne výpis čísel pro Petra – proto na konci
+    # vždycky stojí, co s tím udělám. (Petr 2026-07-31)
+    ztraty = dl_pocet + v["vzdane_prilohy"]
+    r = []
+    if problem:
+        r.append("🔴 Něco k řešení")
+    else:
+        r.append("🟢 Čistý den, nic se neztratilo")
+    r.append("")
+    r.append(f"Zpráv: {v['odpovedi']} · restartů: {v['restarty']}")
+
+    if ztraty:
+        r.append("")
+        r.append(f"❌ NEDORUČENO: {ztraty}")
+        if dl_pocet:
+            r.append(f"   • {dl_pocet} v odkladišti")
+        if v["vzdane_prilohy"]:
+            r.append(f"   • {v['vzdane_prilohy']} vzdaných příloh")
+    if v["inject_selhal"]:
+        zachraneno = v["inject_po_opakovani"]
+        r.append("")
+        r.append(f"⚠️ Nešlo zapsat do okna: {v['inject_selhal']}×"
+                 + (f", z toho {zachraneno}× zachránilo opakování" if zachraneno else ""))
+    if v["backstop"]:
+        r.append(f"⚠️ Pojistka musela zaskočit: {v['backstop']}×")
+
+    r.append("")
+    r.append(f"Odezva: obvykle {v.get('median_turn', 0):.0f} s, nejhorší {v['nejdelsi_turn']:.0f} s")
+    if v["sit_vypadky"]:
+        r.append(f"Výpadků sítě: {v['sit_vypadky']} (bridge je přežil)")
+
     if sti:
-        print()
-        print(f"⚠️ Petr {len(sti)}× hlásil, že něco nedorazilo – to je nejtvrdší důkaz:")
-        for s in sti[:5]:
-            print(f"   {s}")
-    if dl_ukazky:
-        print()
-        print("Nedoručené záznamy k prohlédnutí:")
-        for z in dl_ukazky:
-            print(f"   {z}")
+        r.append("")
+        r.append(f"🔔 {len(sti)}× jsi hlásil, že něco nedorazilo – to má přednost před vším ostatním")
+
+    # Co s tím – tohle je jádro celého rozboru
+    r.append("")
+    if ztraty:
+        r.append("→ Jdu se podívat na ty nedoručené a najít příčinu.")
+    elif sti:
+        r.append("→ Projdu, co se dělo v tu chvíli, cos psal.")
+    elif v["inject_selhal"] and not v["inject_po_opakovani"]:
+        r.append("→ Zápis do okna selhává a opakování nepomáhá. Podívám se na to.")
+    elif v["restarty"] > 2:
+        r.append(f"→ {v['restarty']} restartů je moc, zjistím proč.")
+    elif problem:
+        r.append("→ Prohlédnu si detaily v logu.")
+    else:
+        r.append("→ Nic nedělám, jen sleduju dál.")
+    print("\n".join(r))
     return 0
 
 
