@@ -179,7 +179,7 @@ class InboundDurabilityTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             b = _bridge(td)
 
-            def _die(upd):
+            def _die(upd, record_id=None):
                 raise SystemExit("kill uprostřed zpracování")
 
             b._submit_inbound_update = _die
@@ -207,7 +207,9 @@ class InboundDurabilityTests(unittest.TestCase):
                 raise RuntimeError("tmux je mrtvý")
 
             b._handle = _boom
-            b._submit_inbound_update(_msg(2000))
+            # Přes _handle_update_once, ne přímým submitem – jinak by zpráva minula
+            # rezervaci v inboxu a test by měřil něco jiného, než se v provozu děje.
+            b._handle_update_once(_msg(2000), 2000)
             for _ in range(50):
                 if calls:
                     break

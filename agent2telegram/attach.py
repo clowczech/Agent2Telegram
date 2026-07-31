@@ -28,6 +28,7 @@ from pathlib import Path
 from . import adapters
 from . import readers
 from .config import Config, _state_dir
+from .durable import DurableInbox
 from .session import SessionError, TmuxSession
 from .telegram import TelegramClient, TelegramError, is_network_error
 
@@ -41,6 +42,9 @@ IDLE_DONE = 90.0
 # Krátká pauza záměrně: zpráva od uživatele nesmí čekat déle, než kolik trvá jeho trpělivost.
 INJECT_ATTEMPTS = 3
 INJECT_RETRY_WAIT = 1.5
+# Kolikrát se zkusí doručit uložená příchozí zpráva, než skončí v dead-letter.
+# Radši ji tam odložit s důvodem než ji smazat – aspoň je dohledatelná.
+INBOUND_MAX_ATTEMPTS = 5
 #: How often we re-assert the "typing…" chat action (Telegram shows it for ~5s). Kept well
 #: under that window so a turn never shows a gap, even right after a sent message clears it.
 TYPING_INTERVAL = 1.5
@@ -429,6 +433,20 @@ class AttachBridge:
             self._processed_updates_file = _state_dir() / "processed_updates"
         if not hasattr(self, "_processed_update_ids") or not hasattr(self, "_processed_update_order"):
             self._processed_update_ids, self._processed_update_order = self._read_processed_updates()
+        self._ensure_inbox()
+
+    def _ensure_inbox(self) -> DurableInbox | None:
+        """Durable inbox nad TÍMŽ adresářem, kde leží offset – ať se v testech i v provozu
+        stav drží pohromadě a nezáleží na tom, kdo objekt složil."""
+        inbox = getattr(self, "_inbox", None)
+        if inbox is None:
+            try:
+                inbox = DurableInbox(self._offset_file.parent)
+            except Exception as e:                     # nesmí shodit příjem zpráv
+                log.error("durable inbox se nepodařilo otevřít: %s", e)
+                inbox = None
+            self._inbox = inbox
+        return inbox
 
     def _load_offset(self) -> int:
         self._ensure_update_state()
@@ -515,10 +533,23 @@ class AttachBridge:
             self._save_offset(next_offset)
             return next_offset
 
-        # Telegram only confirms an update when the next getUpdates call uses a higher offset.
-        # Persist our offset before accepting work so a local restart cannot replay the same prompt.
+        # POŘADÍ JE KRITICKÉ. Telegram bere update za vyřízený, jakmile si řekneme o vyšší
+        # offset – znovu ho nepošle nikdy. Dřív se offset posunul dřív, než zpráva doputovala
+        # kamkoli trvalého (sedla si jen do fronty v paměti), takže pád v tom okně ji smazal
+        # ze světa. Monitor bridge 30. 7. zabíjel 4× denně, takže to nebyla teorie.
+        #
+        # Nově: nejdřív zápis na disk, teprve pak ACK. Když zápis selže, offset se NEPOSUNE
+        # a Telegram nám zprávu pošle znovu – radši dvakrát než nikdy.
+        record_id = None
+        inbox = self._ensure_inbox()
+        if inbox is not None:
+            try:
+                record_id = inbox.reserve(upd)
+            except Exception as e:
+                log.error("update %s se nepodařilo uložit, offset neposouvám: %s", update_id, e)
+                return offset
         self._save_offset(next_offset)
-        self._submit_inbound_update(upd)
+        self._submit_inbound_update(upd, record_id)
         self._mark_update_processed(update_id)
         return next_offset
 
@@ -631,9 +662,9 @@ class AttachBridge:
             threading.Thread(target=self._inbound_worker_loop, daemon=True).start()
             self._inbound_worker_started = True
 
-    def _submit_inbound_update(self, upd: dict) -> None:
+    def _submit_inbound_update(self, upd: dict, record_id: str | None = None) -> None:
         self._start_inbound_worker()
-        self._inbound_queue.put(upd)
+        self._inbound_queue.put((upd, record_id))
 
     def _inbound_worker_loop(self) -> None:
         """Process accepted Telegram updates FIFO outside the long-poll thread.
@@ -643,15 +674,47 @@ class AttachBridge:
         """
         while not self._stop.is_set() or not self._inbound_queue.empty():
             try:
-                upd = self._inbound_queue.get(timeout=0.2)
+                polozka = self._inbound_queue.get(timeout=0.2)
             except queue.Empty:
                 continue
+            upd, record_id = polozka if isinstance(polozka, tuple) else (polozka, None)
             try:
-                self._handle(upd)
+                doruceno = self._handle(upd)
             except Exception as e:
                 log.exception("inbound worker error: %s", e)
+                self._inbound_failed(record_id, str(e))
+            else:
+                # `_handle` vrací False, když se zpráva nedostala do session. Dřív se v obou
+                # případech jen zavolalo task_done a zpráva zmizela – to je nález B z auditu.
+                if doruceno is False:
+                    self._inbound_failed(record_id, "nedoručeno do session")
+                else:
+                    self._inbound_done(record_id)
             finally:
                 self._inbound_queue.task_done()
+
+    def _inbound_done(self, record_id: str | None) -> None:
+        inbox = getattr(self, "_inbox", None)
+        if record_id and inbox is not None:
+            try:
+                inbox.done(record_id)
+            except Exception as e:
+                log.warning("úklid doručeného záznamu %s selhal: %s", record_id, e)
+
+    def _inbound_failed(self, record_id: str | None, duvod: str) -> None:
+        """Nedoručeno → záznam zůstává a zkusí se znovu. Po vyčerpání pokusů jde do
+        dead-letter, ať zpráva nezmizí bez stopy ani v beznadějném případě."""
+        inbox = getattr(self, "_inbox", None)
+        if not record_id or inbox is None:
+            return
+        try:
+            pokusu = inbox.fail(record_id, duvod)
+            if pokusu >= INBOUND_MAX_ATTEMPTS:
+                inbox.give_up(record_id, f"{duvod} (po {pokusu} pokusech)")
+                log.error("update %s se nepodařilo doručit ani na %d. pokus → dead-letter",
+                          record_id, pokusu)
+        except Exception as e:
+            log.warning("označení nedoručeného záznamu %s selhalo: %s", record_id, e)
 
     def _inbound_loop(self) -> None:
         self._start_inbound_worker()
@@ -695,28 +758,36 @@ class AttachBridge:
                 except Exception as e:
                     log.exception("inbound error: %s", e)
 
-    def _handle(self, upd: dict) -> None:
+    def _handle(self, upd: dict) -> bool:
+        """Zpracuje jeden update. Vrací False JEN když se zpráva nedoručila do session.
+
+        Návratová hodnota řídí durable inbox: True = vyřízeno, záznam smí zmizet;
+        False = nedoručeno, záznam zůstává a zkusí se znovu. Proto všechny větve typu
+        „není co dělat" vracejí True – opakovat je nemá smysl. False chodí výhradně
+        ze selhaného zápisu do tmuxu, tedy přesně z toho, co opakování léčí.
+        """
         # Reactions (e.g. ❤️) → quick-feedback line.
         mr = upd.get("message_reaction")
         if mr:
             if mr.get("user", {}).get("id") not in self._allowed:
-                return
+                return True
             emojis = "".join(r.get("emoji", "") for r in mr.get("new_reaction", [])
                              if r.get("type") == "emoji")
             if emojis:
                 self._begin_turn()
-                self._inject(f"{emojis} reacted {emojis} to your message #{mr.get('message_id')} "
-                             f"— quick feedback; no need to reply unless relevant.")
-            return
+                return self._inject(
+                    f"{emojis} reacted {emojis} to your message #{mr.get('message_id')} "
+                    f"— quick feedback; no need to reply unless relevant.")
+            return True
 
         msg = upd.get("message") or upd.get("edited_message")
         if not msg:
-            return
+            return True
         user_id = msg.get("from", {}).get("id")
         chat_id = msg["chat"]["id"]
         if user_id not in self._allowed:
             self.tg.send_message(chat_id, "⛔ Not authorized.")
-            return
+            return True
 
         # Bridge-level slash commands (e.g. /start, /help) are answered here instead of being
         # forwarded to the agent — so the first contact is a friendly intro, not the agent
@@ -725,24 +796,27 @@ class AttachBridge:
         if text0.startswith("/") and not (msg.get("voice") or msg.get("audio")
                                            or msg.get("photo") or msg.get("document")):
             if self._handle_command(text0, chat_id, msg.get("message_id")):
-                return
+                return True
 
         text = (msg.get("text") or msg.get("caption") or "").strip()
         if msg.get("voice") or msg.get("audio"):
+            # Přepis i stahování si řeší vlastní opakování a uživateli samy hlásí chybu,
+            # takže se sem nevracíme – opakování zvenčí by jen znovu platilo za přepis.
             text = self._transcribe(msg.get("voice") or msg.get("audio"), chat_id) or text
             if not text:
-                return
+                return True
         elif msg.get("photo") or msg.get("document"):
             note = self._download_note(msg, chat_id)
             if not note:
-                return
+                return True
             text = f"{text}\n{note}".strip()
         if text:
             text = self._limit_inbound_prompt(text, chat_id)
             if not text:
-                return
+                return True
             self._begin_turn()
-            self._inject(text)
+            return self._inject(text)
+        return True
 
     def _begin_turn(self) -> None:
         # Light "typing…" from the actual injection point.
