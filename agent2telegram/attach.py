@@ -105,13 +105,18 @@ BOT_COMMANDS = [
 #: phrases speakable text (short, numbers as words, no paths) far better than any post-processing.
 #: Same idea as the "[voice transcript …]" marker on the inbound side.
 VOICE_MODE_HINT = (
-    "[voice mode ON — your reply will be read aloud as a voice note. Write it to be HEARD: "
-    "short and conversational, numbers as words, no markdown, tables, code, file paths or URLs.]"
+    "[voice mode ON — your reply will be SPOKEN, not read. HARD RULE: keep it under ~20 seconds "
+    "of speech (a few short sentences). The whole point is that the user does not have to read, "
+    "so a long voice note defeats it. Say the one thing that matters; offer details only if asked. "
+    "Conversational tone, numbers as words, no markdown, tables, code, file paths or URLs.]"
 )
 #: Above this length a reply is sent as TEXT even in voice mode — reading a two-page analysis
 #: aloud is worse than scannable text (and a >~45 s voice note is unwieldy). The agent is asked
 #: to keep spoken replies short; this is the backstop when it doesn't.
-VOICE_MAX_CHARS = 600
+# Strop pro čtení nahlas. Zvednutý z 600 (Petr 2026-08-01) – ale je to POJISTKA, ne cíl.
+# Smysl hlasového režimu je, aby uživatel nemusel číst; dlouhá hlasovka ten smysl ruší
+# stejně jako dlouhý text. Agent má psát KRATŠÍ, ne psát až sem.
+VOICE_MAX_CHARS = 1200
 
 import re as _re  # noqa: E402
 from .readers import _short  # noqa: E402
