@@ -907,3 +907,31 @@ class ReplyContextTests(unittest.TestCase):
             vlozeno = "\n".join(b._session.injected)
             self.assertIn("…", vlozeno, "dlouhá citace se neořízla – zahltila by prompt")
             self.assertLess(len(vlozeno), 700)
+
+
+class VoiceTranscriptMarkerTests(unittest.TestCase):
+    """Přepsaná hlasovka musí být označená, aby ji agent nebral jako doslovný text.
+
+    2026-08-01: Petrova hlasovka se přepsala do čínštiny. Bez značky jsem mu tvrdila,
+    že zpráva dorazila přesně tak, jak ji poslal – tedy nesmysl s jistotou. Se značkou
+    by bylo hned jasné, že jde o chybu rozpoznávání, a šlo hádat podle kontextu.
+    """
+
+    def test_voice_message_is_marked_as_transcript(self):
+        with tempfile.TemporaryDirectory() as td:
+            b = _bridge(td)
+            b._transcribe = lambda *a, **k: "广路有什么姓名"
+            upd = _msg(8001)
+            upd["message"].pop("text")
+            upd["message"]["voice"] = {"file_id": "abc", "duration": 3}
+            b._handle(upd)
+            vlozeno = "\n".join(b._session.injected)
+            self.assertIn("voice transcript", vlozeno,
+                          "agent nepozná, že čte strojový přepis")
+            self.assertIn("广路有什么姓名", vlozeno)
+
+    def test_typed_message_has_no_marker(self):
+        with tempfile.TemporaryDirectory() as td:
+            b = _bridge(td)
+            b._handle(_msg(8002, "tohle jsem napsal"))
+            self.assertNotIn("voice transcript", "\n".join(b._session.injected))

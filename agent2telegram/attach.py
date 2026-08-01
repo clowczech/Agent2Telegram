@@ -1003,6 +1003,11 @@ class AttachBridge:
             text = self._transcribe(msg.get("voice") or msg.get("audio"), chat_id) or text
             if not text:
                 return True
+            # Agent MUSÍ vědět, že čte strojový přepis, ne psaný text. Bez toho bere přepis
+            # jako doslovné znění a u chyby rozpozná nesmysl místo překlepu: 2026-08-01 se
+            # Petrova hlasovka přepsala do čínštiny a já mu tvrdila, že dorazila přesně tak,
+            # jak ji poslal. S touhle značkou bych rovnou hádala podle kontextu.
+            text = f"[voice transcript – may contain recognition errors]\n{text}"
         elif msg.get("photo") or msg.get("document"):
             note = self._download_note(msg, chat_id)
             if not note:
