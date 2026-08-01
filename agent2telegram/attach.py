@@ -751,7 +751,7 @@ class AttachBridge:
             self._mark_sent(key)
         if turn_text:
             self._turn_text_sent = True
-        log.info("FWD (send) %r", text[:30])
+        log.info("FWD (send, legacy path) %r", text[:40].replace("\n", " "))
         self._flush_files()
 
     def _ensure_outbox(self) -> "DurableOutbox | None":
@@ -827,8 +827,12 @@ class AttachBridge:
                 # marked, so they are not resent; the next cycle just tries to finish it.
                 return
             outbox.done(rec.record_id)
-            log.info("FWD (delivered) %d parts, %d attachments",
-                     len(rec.chunks), len(rec.files))
+            # The record id and a text preview are logged ON PURPOSE: on 2026-08-01 the user
+            # received one reply twice and the log could not tell whether it was the same
+            # message delivered twice or two different ones. Without that, any fix is a guess.
+            nahled = (rec.chunks[0][:40] if rec.chunks else "(files only)").replace("\n", " ")
+            log.info("FWD (delivered) id=%s %d parts, %d attachments %r",
+                     rec.record_id, len(rec.chunks), len(rec.files), nahled)
 
         while self._pending_send and self._owner_chat is not None:
             item = self._pending_send[0]
