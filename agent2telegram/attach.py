@@ -1094,7 +1094,12 @@ class AttachBridge:
         if chat_id is None:
             return
         ted = time.monotonic()
-        if ted - getattr(self, "_last_queue_ack", 0.0) < QUEUE_ACK_COOLDOWN:
+        # POZOR na výchozí hodnotu: `time.monotonic()` počítá od startu SYSTÉMU, takže na
+        # macOS s dlouhým během je to velké číslo, ale na čerstvě nastartovaném Linuxu
+        # (kontejner, restart serveru) skoro nula. S výchozí 0.0 by tam prvních 30 sekund
+        # žádné potvrzení neodešlo. Proto None = "ještě nikdy", ne nula.
+        posledni = getattr(self, "_last_queue_ack", None)
+        if posledni is not None and ted - posledni < QUEUE_ACK_COOLDOWN:
             return
         self._last_queue_ack = ted
         try:

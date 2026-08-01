@@ -131,3 +131,22 @@ běžet „pro jistotu". A po spuštění čehokoli, co vytváří virtuální s
 
 Vyřešeno: `colima stop`, port ověřeně zavřený. Pro další testy na Linuxu ji nastartuju znovu
 a hned potom zastavím.
+
+---
+
+## 2026-08-01 · Potvrzení příjmu by na Linuxu prvních 30 s nefungovalo
+
+**Co se stalo:** cooldown potvrzování používal jako výchozí hodnotu `0.0` a porovnával ji
+s `time.monotonic()`. Ten ale počítá od startu **systému**: na macOS s dlouhým během je to velké
+číslo (podmínka projde), na čerstvě nastartovaném Linuxu skoro nula (podmínka neprojde).
+Na Ubuntu by tedy prvních 30 sekund po startu žádné potvrzení neodešlo.
+
+**Proč to prošlo:** všech 208 testů bylo na macOS zelených. Chyba se ukázala až v kontejneru.
+
+**Škoda:** žádná – zachyceno před nasazením.
+
+**Co to příště chytne:** testy na Linuxu **před** nasazením, ne až po. A u každé práce s časem
+si položit otázku, od čeho se vlastně počítá – `monotonic()` není totéž na stroji běžícím
+měsíc a na čerstvě spuštěném kontejneru.
+
+Tohle je přesně ten druh chyby, kvůli kterému Petr chtěl, aby bridge fungoval i na cizím Ubuntu.

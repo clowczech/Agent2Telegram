@@ -844,7 +844,7 @@ class QueuedAckTests(unittest.TestCase):
     def _bridge_v_praci(self, td):
         b = _bridge(td)
         b._turn_active.set()          # něco už běží
-        b._last_queue_ack = 0.0
+        b._last_queue_ack = None   # ještě nikdy nepotvrzeno
         return b
 
     def test_message_during_work_is_acknowledged(self):
@@ -867,7 +867,7 @@ class QueuedAckTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             b = _bridge(td)
             b._turn_active.clear()    # nic neběží → odpověď přijde rovnou, potvrzení je zbytečné
-            b._last_queue_ack = 0.0
+            b._last_queue_ack = None   # ještě nikdy nepotvrzeno
             b._handle_update_once(_msg(9200, "ahoj"), 9200)
             self.assertFalse(any("Got your message" in s for s in b.tg.sent),
                              "potvrzení se posílá i když nic neběží – zbytečný šum")
