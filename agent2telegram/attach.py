@@ -61,6 +61,8 @@ OUTBOUND_TICK = 0.15
 # Jak dlouho po potvrzení příjmu se další potvrzení neposílá. Pět zpráv za sebou má vyvolat
 # jedno "mám to", ne pět.
 QUEUE_ACK_COOLDOWN = 30.0
+# Kolik znaků citované zprávy se agentovi předá. Dost na rozpoznání, málo na zahlcení promptu.
+REPLY_QUOTE_CHARS = 300
 #: How often we re-assert the "typing…" chat action (Telegram shows it for ~5s). Kept well
 #: under that window so a turn never shows a gap, even right after a sent message clears it.
 TYPING_INTERVAL = 1.5
@@ -1007,12 +1009,29 @@ class AttachBridge:
                 return True
             text = f"{text}\n{note}".strip()
         if text:
+            text = self._prepend_reply_context(msg, text)
             text = self._limit_inbound_prompt(text, chat_id)
             if not text:
                 return True
             self._begin_turn()
             return self._inject(text)
         return True
+
+    def _prepend_reply_context(self, msg: dict, text: str) -> str:
+        """Když uživatel odpovídá na konkrétní zprávu, řekni agentovi na kterou.
+
+        Bez tohohle dostane agent jen holý text a musí hádat z kontextu. U krátkého
+        "tohle oprav" pod automatickým hlášením je to k neuhodnutí (Petr 2026-07-31).
+        Značka je anglicky, protože ji píše nástroj, ne agent.
+        """
+        puvodni = msg.get("reply_to_message") or {}
+        citace = (puvodni.get("text") or puvodni.get("caption") or "").strip()
+        if not citace:
+            return text
+        citace = " ".join(citace.split())
+        if len(citace) > REPLY_QUOTE_CHARS:
+            citace = citace[:REPLY_QUOTE_CHARS] + "…"
+        return f"[replying to: {citace}]\n{text}"
 
     def _maybe_ack_queued(self, upd: dict) -> None:
         """Potvrdí příjem zprávy, která přišla během rozdělané práce.

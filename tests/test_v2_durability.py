@@ -871,3 +871,39 @@ class QueuedAckTests(unittest.TestCase):
             b._handle_update_once(_msg(9200, "ahoj"), 9200)
             self.assertFalse(any("Got your message" in s for s in b.tg.sent),
                              "potvrzení se posílá i když nic neběží – zbytečný šum")
+
+
+class ReplyContextTests(unittest.TestCase):
+    """Odpověď na konkrétní zprávu musí agentovi říct, na co uživatel reaguje.
+
+    Petr 2026-07-31: „kdybych dal reply na automatickou zprávu, měla bys vědět, co komentuji."
+    Bez toho dostane agent jen holý text – u krátkého „tohle oprav" pod denním hlášením
+    je to k neuhodnutí.
+    """
+
+    def test_reply_adds_quoted_context(self):
+        with tempfile.TemporaryDirectory() as td:
+            b = _bridge(td)
+            upd = _msg(7001, "tohle oprav")
+            upd["message"]["reply_to_message"] = {"text": "📊 Bridge za dnešek\n- 2× nešlo zapsat do okna."}
+            b._handle(upd)
+            vlozeno = "\n".join(b._session.injected)
+            self.assertIn("replying to:", vlozeno, "agent nedostal informaci, na co uživatel reaguje")
+            self.assertIn("nešlo zapsat do okna", vlozeno)
+            self.assertIn("tohle oprav", vlozeno)
+
+    def test_plain_message_has_no_quote(self):
+        with tempfile.TemporaryDirectory() as td:
+            b = _bridge(td)
+            b._handle(_msg(7002, "normální zpráva"))
+            self.assertNotIn("replying to:", "\n".join(b._session.injected))
+
+    def test_long_quote_is_trimmed(self):
+        with tempfile.TemporaryDirectory() as td:
+            b = _bridge(td)
+            upd = _msg(7003, "a co tohle")
+            upd["message"]["reply_to_message"] = {"text": "x" * 2000}
+            b._handle(upd)
+            vlozeno = "\n".join(b._session.injected)
+            self.assertIn("…", vlozeno, "dlouhá citace se neořízla – zahltila by prompt")
+            self.assertLess(len(vlozeno), 700)
