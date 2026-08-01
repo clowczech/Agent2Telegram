@@ -8,7 +8,7 @@ set -euo pipefail
 # the source clone) — otherwise git/curl fail with "cannot access parent directories: getcwd".
 cd "$PWD" 2>/dev/null || cd "$HOME" 2>/dev/null || cd /
 
-REPO="https://github.com/petrludwig-collab/Agent2Telegram.git"
+REPO="https://github.com/agent2telegram/Agent2Telegram.git"
 NEED_PY_MAJOR=3
 NEED_PY_MINOR=10
 

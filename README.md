@@ -1,6 +1,6 @@
 # Agent2Telegram
 
-[![CI](https://github.com/petrludwig-collab/Agent2Telegram/actions/workflows/ci.yml/badge.svg)](https://github.com/petrludwig-collab/Agent2Telegram/actions/workflows/ci.yml)
+[![CI](https://github.com/agent2telegram/Agent2Telegram/actions/workflows/ci.yml/badge.svg)](https://github.com/agent2telegram/Agent2Telegram/actions/workflows/ci.yml)
 ![Python](https://img.shields.io/badge/python-3.10%2B-blue)
 ![Dependencies](https://img.shields.io/badge/dependencies-none-brightgreen)
 ![License](https://img.shields.io/badge/license-MIT-green)
@@ -37,7 +37,7 @@ key (see *Voice messages* below).
 
 ```bash
 # 1) Get the code
-git clone https://github.com/petrludwig-collab/Agent2Telegram.git
+git clone https://github.com/agent2telegram/Agent2Telegram.git
 cd Agent2Telegram
 
 # 2) Run the setup wizard (pick agent → paste token → authorize yourself)
@@ -50,7 +50,7 @@ python3 -m agent2telegram run
 …or the one‑liner:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/petrludwig-collab/Agent2Telegram/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/agent2telegram/Agent2Telegram/main/install.sh | bash
 ```
 
 ### What the wizard asks (3 steps)
@@ -105,7 +105,7 @@ Three steps:
 2. **Have a Telegram bot token ready** (create a bot with [@BotFather](https://t.me/BotFather)).
 3. **Paste this prompt** into your agent:
 
-   > Install **Agent2Telegram** from `https://github.com/petrludwig-collab/Agent2Telegram`
+   > Install **Agent2Telegram** from `https://github.com/agent2telegram/Agent2Telegram`
    > by following its `AGENTS.md` exactly. Connect it to **me on Telegram**. Ask me for the
    > bot token and my Telegram user id when you need them. Do not weaken the security rules.
    > When finished, verify with `python3 -m agent2telegram doctor` and confirm I get a reply
@@ -164,7 +164,7 @@ Both report `6/6 checks passed` on a working setup.
 One line — the exact mirror of the install one‑liner:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/petrludwig-collab/Agent2Telegram/main/uninstall.sh | bash
+curl -fsSL https://raw.githubusercontent.com/agent2telegram/Agent2Telegram/main/uninstall.sh | bash
 ```
 
 That stops any running bridge and removes **everything**: the config (token included), state,
