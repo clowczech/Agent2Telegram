@@ -13,6 +13,9 @@ def _voice_bridge(td, *, key="el-key", on=False, session=None):
     b.cfg.elevenlabs_api_key = key
     b._voice_state_path = Path(td) / "voice_mode"
     b._voice_on = on
+    b._sent_path = Path(td) / "attach_sent.txt"     # _mark_sent persists here
+    # Observe the immediate text send directly; the durable outbox path is covered elsewhere.
+    b._use_durable_outbox = False
     return b
 
 
@@ -63,6 +66,83 @@ class MarkerInjectionTests(unittest.TestCase):
             b._handle(_msg(1, "co je nového?"))
             self.assertTrue(b._session.injected)
             self.assertNotIn(VOICE_MODE_HINT, b._session.injected[0])
+
+
+class DeliveryDecisionTests(unittest.TestCase):
+    """_send_final routing: voice on success replaces text; any failure or a too-long reply
+    falls back to durable TEXT so the reply NEVER disappears."""
+
+    def test_short_reply_goes_as_voice_and_not_as_text(self):
+        with tempfile.TemporaryDirectory() as td:
+            b = _voice_bridge(td, on=True)
+            calls = []
+            b._try_send_voice = lambda t: (calls.append(t) or True)
+            b._send_final("Ahoj, mám hotovo.", key="k1")
+            self.assertEqual(len(calls), 1, "voice should be attempted")
+            self.assertEqual(b.tg.sent, [], "no text should be sent when voice succeeds")
+            self.assertIn("k1", b._sent_keys)
+
+    def test_voice_failure_falls_back_to_text(self):
+        with tempfile.TemporaryDirectory() as td:
+            b = _voice_bridge(td, on=True)
+            b._try_send_voice = lambda t: False        # TTS/ffmpeg/network down
+            b._send_final("Ahoj, mám hotovo.", key="k2")
+            self.assertTrue(b.tg.sent, "reply must still arrive as text")
+            self.assertTrue(any("voice unavailable" in s.lower() for s in b.tg.sent),
+                            "and say why it came as text")
+
+    def test_long_reply_stays_text(self):
+        with tempfile.TemporaryDirectory() as td:
+            b = _voice_bridge(td, on=True)
+            called = []
+            b._try_send_voice = lambda t: called.append(t) or True
+            long_text = "x" * 800
+            b._send_final(long_text, key="k3")
+            self.assertEqual(called, [], "a long reply must not be spoken")
+            self.assertTrue(b.tg.sent, "long reply arrives as text")
+            self.assertTrue(any("too long" in s.lower() for s in b.tg.sent))
+
+    def test_voice_off_sends_text_without_attempting_voice(self):
+        with tempfile.TemporaryDirectory() as td:
+            b = _voice_bridge(td, on=False)
+            called = []
+            b._try_send_voice = lambda t: called.append(t) or True
+            b._send_final("Ahoj.", key="k4")
+            self.assertEqual(called, [])
+            self.assertEqual(b.tg.sent, ["Ahoj."])
+
+
+class TrySendVoiceTests(unittest.TestCase):
+    def test_missing_ffmpeg_is_a_clean_false(self):
+        import agent2telegram.attach as attach_mod
+        with tempfile.TemporaryDirectory() as td:
+            b = _voice_bridge(td, on=True)
+            orig = attach_mod.shutil.which
+            attach_mod.shutil.which = lambda name: None      # pretend ffmpeg absent
+            try:
+                self.assertFalse(b._try_send_voice("ahoj"))  # no crash, just False
+            finally:
+                attach_mod.shutil.which = orig
+
+
+class SendVoiceApiTests(unittest.TestCase):
+    def test_send_voice_uses_sendVoice_method_and_voice_field(self):
+        from agent2telegram.telegram import TelegramClient
+        captured = {}
+
+        def fake_multipart(method, fields, file_field, filename, payload, **kw):
+            captured.update(method=method, file_field=file_field, fields=fields)
+            return {}
+
+        c = TelegramClient("123:abc")
+        c._call_multipart = fake_multipart
+        with tempfile.NamedTemporaryFile(suffix=".ogg") as f:
+            f.write(b"OggS-fake")
+            f.flush()
+            c.send_voice(7, f.name)
+        self.assertEqual(captured["method"], "sendVoice")
+        self.assertEqual(captured["file_field"], "voice")
+        self.assertEqual(captured["fields"], {"chat_id": 7})
 
 
 if __name__ == "__main__":

@@ -354,6 +354,17 @@ class TelegramClient:
         self._call_multipart(method, fields, field, os.path.basename(path), payload)
         log.info("sent %s (%s, %d bytes)", os.path.basename(path), method, size)
 
+    def send_voice(self, chat_id: int, path) -> None:
+        """Send an OGG/OPUS file as a Telegram VOICE note (a bubble with a waveform), not a
+        nondescript audio attachment. The file must already be OGG/OPUS; conversion is the
+        caller's job (ffmpeg)."""
+        path = os.fspath(path)
+        with open(path, "rb") as fh:
+            payload = fh.read()
+        self._call_multipart("sendVoice", {"chat_id": chat_id}, "voice",
+                             os.path.basename(path), payload)
+        log.info("sent voice note (%d bytes)", len(payload))
+
     def send_message(self, chat_id: int, text: str, *, parse_mode: str = "auto") -> None:
         """Send text, splitting to Telegram's size limit. By default (``parse_mode="auto"``)
         the agent's Markdown is rendered via HTML; on any parse failure we fall back to plain

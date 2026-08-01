@@ -21,7 +21,9 @@ import json
 import os
 import logging
 import queue
+import shutil
 import subprocess
+import tempfile
 import threading
 import time
 from contextlib import contextmanager
@@ -29,6 +31,7 @@ from pathlib import Path
 
 from . import adapters
 from . import readers
+from . import tts
 from .compat import AlreadyRunning, single_instance_lock
 from .config import Config, _state_dir
 from .durable import DurableInbox, DurableOutbox
@@ -105,6 +108,10 @@ VOICE_MODE_HINT = (
     "[voice mode ON — your reply will be read aloud as a voice note. Write it to be HEARD: "
     "short and conversational, numbers as words, no markdown, tables, code, file paths or URLs.]"
 )
+#: Above this length a reply is sent as TEXT even in voice mode — reading a two-page analysis
+#: aloud is worse than scannable text (and a >~45 s voice note is unwieldy). The agent is asked
+#: to keep spoken replies short; this is the backstop when it doesn't.
+VOICE_MAX_CHARS = 600
 
 import re as _re  # noqa: E402
 from .readers import _short  # noqa: E402
@@ -676,6 +683,20 @@ class AttachBridge:
             return
         if key and key in self._sent_keys:
             return
+        # Voice-reply mode: speak the reply as a Telegram voice note. Best-effort ENHANCEMENT —
+        # a too-long reply or ANY failure falls straight through to the durable TEXT path below,
+        # so voice mode can NEVER make a reply not arrive (that is the whole point of v2).
+        if (turn_text and text and self._voice_reply_on()
+                and not (self.cfg.file_marker and self.cfg.file_marker.lower() in text.lower())):
+            if len(text) > VOICE_MAX_CHARS:
+                text = f"{text}\n\n🗣️→📝 (too long to read aloud — sent as text)"
+            elif self._try_send_voice(text):
+                if key:
+                    self._mark_sent(key)
+                self._turn_text_sent = True
+                return
+            else:
+                text = f"🗣️→📝 (voice unavailable — sent as text)\n{text}"
         # `[tg-file] <path>` lines are attachments, not content — pull them out, send the
         # text first, then upload. Without this the agent had to bypass the bridge with a
         # raw curl, which is exactly what we do not want (markdown broke, [tg] leaked).
@@ -1236,6 +1257,48 @@ class AttachBridge:
             tmp.replace(self._voice_state_path)          # atomic persist
         except OSError as e:
             log.warning("could not persist voice-mode state: %s", e)
+
+    def _try_send_voice(self, text: str) -> bool:
+        """Render *text* to a Telegram voice note (ElevenLabs → mp3 → OGG/OPUS via ffmpeg →
+        sendVoice). Returns True on success; on ANY failure returns False so the caller falls
+        back to durable text. Never raises — voice must not break delivery."""
+        key = self.cfg.elevenlabs_api_key
+        if not key:
+            return False
+        ffmpeg = shutil.which("ffmpeg")
+        if not ffmpeg:
+            log.warning("voice reply skipped: ffmpeg not on PATH")
+            return False
+        try:
+            spoken = tts.sanitize_for_speech(text)            # rough safety net only
+            mp3 = tts.synthesize(spoken, api_key=key, voice_id=self.cfg.tts_voice_id,
+                                 model_id=self.cfg.tts_model_id)
+        except Exception as e:
+            log.warning("voice reply TTS failed: %s", e)
+            return False
+        tmpdir = tempfile.mkdtemp(prefix="a2t_voice_")
+        try:
+            mp3_path = os.path.join(tmpdir, "reply.mp3")
+            ogg_path = os.path.join(tmpdir, "reply.ogg")
+            with open(mp3_path, "wb") as fh:
+                fh.write(mp3)
+            # OGG/OPUS is what Telegram wants for a real voice bubble; other formats become a
+            # plain audio attachment. No shell.
+            r = subprocess.run(
+                [ffmpeg, "-y", "-i", mp3_path, "-c:a", "libopus", "-b:a", "32k", ogg_path],
+                capture_output=True, timeout=60,
+            )
+            if r.returncode != 0 or not os.path.exists(ogg_path) or os.path.getsize(ogg_path) == 0:
+                log.warning("voice reply ffmpeg conversion failed (rc=%s)", r.returncode)
+                return False
+            self.tg.send_voice(self._owner_chat, ogg_path)
+            log.info("FWD (voice) %r", text[:30])
+            return True
+        except Exception as e:
+            log.warning("voice reply send failed: %s", e)
+            return False
+        finally:
+            shutil.rmtree(tmpdir, ignore_errors=True)
 
     def _toggle_voice(self, chat_id: int) -> bool:
         if not self.cfg.elevenlabs_api_key:
