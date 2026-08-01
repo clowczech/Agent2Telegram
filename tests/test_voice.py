@@ -4,6 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from agent2telegram import attach as attach_mod
 from agent2telegram.attach import VOICE_MODE_HINT
 from tests.test_v2_durability import _bridge, _msg
 
@@ -96,7 +97,9 @@ class DeliveryDecisionTests(unittest.TestCase):
             b = _voice_bridge(td, on=True)
             called = []
             b._try_send_voice = lambda t: called.append(t) or True
-            long_text = "x" * 800
+            # Odvozeno od konstanty, ne pevné číslo: limit se 2026-08-01 zvedl z 600 na 1200
+            # a test s natvrdo napsanou délkou tím spadl. Test má hlídat CHOVÁNÍ, ne hodnotu.
+            long_text = "x" * (attach_mod.VOICE_MAX_CHARS + 100)
             b._send_final(long_text, key="k3")
             self.assertEqual(called, [], "a long reply must not be spoken")
             self.assertTrue(b.tg.sent, "long reply arrives as text")
