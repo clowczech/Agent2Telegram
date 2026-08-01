@@ -119,22 +119,6 @@ VOICE_MODE_HINT = (
 # like a long text does. The agent should write SHORTER, not write all the way up to here.
 VOICE_MAX_CHARS = 1200
 
-#: Outgoing phrases that PROMISE a follow-up message. Deliberately a fixed GUARANTEE list, not a
-#: judgement call: if the agent says one of these and then sends nothing, the bridge reminds the
-#: AGENT (not the user). Matched case-insensitively as a substring.
-PROMISE_PHRASES = (
-    # Czech
-    "pokračování v dalš", "pokračuju v dalš", "pokračování níže", "více v dalš",
-    "posílám další část", "posílám hned", "hned posílám", "hned to pošlu", "za moment pošlu",
-    "posílám za chvíli", "pošlu za chvíli", "pošlu ti to za", "napíšu za chvíli",
-    "ozvu se za pár minut", "ozvu se za chvíli", "posílám vzápětí", "posílám v další zpráv",
-    # English
-    "continuation in the next", "more in the next message", "sending it now", "sending shortly",
-    "i'll send it shortly", "sending in a moment", "i'll get back to you in", "coming up next",
-    "i'll follow up shortly", "will send shortly", "next message follows",
-)
-#: How long a promised follow-up may take before the agent is reminded (once).
-PROMISE_TIMEOUT = 120.0
 
 import re as _re  # noqa: E402
 from .readers import _short  # noqa: E402
@@ -216,7 +200,6 @@ class AttachBridge:
         # The reader knows the agent's transcript format and turns it into a common event stream.
         self._reader = readers.for_agent(cfg.agent)
         self._pending_turn_end = False       # set when the reader signals end-of-turn (Codex)
-        self._pending_promise = None         # armed when a reply promises a follow-up (see below)
         # Accept the configured prefix plus the legacy "Telegram:" one, so a prefix change
         # mid-conversation doesn't drop the turn in flight.
         self._origins = tuple({p for p in (cfg.origin_prefix.strip(), "Telegram:", "[TG]") if p})
@@ -708,8 +691,6 @@ class AttachBridge:
             return
         if key and key in self._sent_keys:
             return
-        if turn_text and text:
-            self._note_outgoing_reply(text)   # promise watchdog: this reply fulfils/arms a promise
         # Voice-reply mode: speak the reply as a Telegram voice note. Best-effort ENHANCEMENT —
         # a too-long reply or ANY failure falls straight through to the durable TEXT path below,
         # so voice mode can NEVER make a reply not arrive (that is the whole point of v2).
@@ -1141,7 +1122,6 @@ class AttachBridge:
 
     def _begin_turn(self) -> None:
         # Light "typing…" from the actual injection point.
-        self._cancel_promise()                   # a new turn = the user re-engaged, don't nag
         self._consume_turn_end()                 # drop any stale end-marker from a prior turn
         now = time.monotonic()
         self._turn_active.set()
@@ -1530,47 +1510,7 @@ class AttachBridge:
         self._drain_transcript()
         self._finish_turn()
 
-    # ---- unfulfilled-promise watchdog -------------------------------------
-    # Saying it in the prompt isn't enough; a control layer is needed. When a reply promises a
-    # follow-up and none comes, remind the AGENT — the user should get the missing message, not
-    # an apology from the tool.
-    @staticmethod
-    def _detect_promise(text: str) -> str | None:
-        low = (text or "").lower()
-        for phrase in PROMISE_PHRASES:
-            if phrase in low:
-                return phrase
-        return None
 
-    def _note_outgoing_reply(self, text: str) -> None:
-        """Called for every turn-text reply. A new outgoing reply FULFILS any pending promise;
-        then this reply may itself arm a new one."""
-        self._pending_promise = None                      # a follow-up arrived → prior promise kept
-        phrase = self._detect_promise(text)
-        if phrase:
-            self._pending_promise = {"phrase": phrase, "deadline": time.monotonic() + PROMISE_TIMEOUT}
-
-    def _cancel_promise(self) -> None:
-        # A new turn (the user re-engaged) counts as handled — don't nag.
-        self._pending_promise = None
-
-    def _check_promise(self) -> None:
-        """Fire ONCE if a promised follow-up never came within PROMISE_TIMEOUT and no new turn
-        started. Reminds the agent via a session marker (never the user)."""
-        promise = getattr(self, "_pending_promise", None)
-        if not promise or time.monotonic() < promise["deadline"]:
-            return
-        self._pending_promise = None                      # once per promise, no repeats
-        phrase = promise["phrase"]
-        log.warning("UNFULFILLED PROMISE — reminding agent: %r", phrase)   # daily-rozbor greps this
-        try:
-            self._session.inject(
-                f'[unfulfilled promise: you said "{phrase}" and never sent the follow-up. '
-                "Send it now, or tell the user why not.]")
-        except Exception as e:
-            log.warning("promise reminder inject failed: %s", e)
-
-    # ---- outbound (session → Telegram) ------------------------------------
     def _outbound_loop(self) -> None:
         while not self._stop.is_set():
             try:
@@ -1601,7 +1541,6 @@ class AttachBridge:
                 if time.monotonic() - getattr(self, "_last_inbound_retry", 0.0) > INBOUND_RETRY_INTERVAL:
                     self._last_inbound_retry = time.monotonic()
                     self._replay_pending_inbound()
-                self._check_promise()         # remind the agent if a promised follow-up never came
                 self._beat()                  # reached only on a full, non-blocking forward cycle
             except Exception as e:
                 log.error("outbound error: %s", e)
