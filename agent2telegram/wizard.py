@@ -156,7 +156,7 @@ def _choose_session(agent_cls) -> str:
     while True:
         choice = _ask("Pick a number, or 'n' for new", "n" if not sessions else "1")
         if choice.lower() == "n":
-            name = _ask("Name for the new session", "lana")
+            name = _ask("Name for the new session", "agent")
             if _create_session(name, agent_cls):
                 print(f"  ✓ created '{name}' and started {agent_cls.label} in it.")
                 return name
