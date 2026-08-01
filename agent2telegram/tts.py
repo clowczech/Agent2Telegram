@@ -4,7 +4,7 @@ Mirrors :mod:`stt.py`: enabled only when the user provides their own key, no thi
 dependency (the request is plain ``urllib``), and the key never lands in a log line or an
 exception message — it only ever goes into the ``xi-api-key`` header.
 
-Division of labour (Petr, 2026-08-01): the AGENT writes the spoken text itself — short, spoken,
+Division of labour (a 2026-08-01 design decision): the AGENT writes the spoken text itself — short, spoken,
 numbers as words, no paths — because it knows what it's saying and does it better than a regex
 ever could. The bridge's job is to TELL the agent that voice mode is on (a marker in the injected
 message, see attach.py). :func:`sanitize_for_speech` here is only a ROUGH SAFETY NET for leftover
@@ -44,7 +44,7 @@ def sanitize_for_speech(text: str) -> str:
     """ROUGH safety net only. The agent is asked to write speakable text; this just removes
     leftover markdown noise and squashes blank lines so a stray ``**`` or table pipe doesn't get
     read aloud. It does NOT spell numbers, expand units, or strip paths — that is the agent's job
-    (a regex guessing 'is this a path?' is exactly what Petr didn't want)."""
+    (a regex guessing 'is this a path?' is exactly what we want to avoid)."""
     t = text or ""
     t = re.sub(r"```.*?```", " ", t, flags=re.S)     # fenced code
     t = re.sub(r"`([^`]*)`", r"\1", t)               # inline code → keep text, drop backticks

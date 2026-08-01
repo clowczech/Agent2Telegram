@@ -113,9 +113,9 @@ VOICE_MODE_HINT = (
 #: Above this length a reply is sent as TEXT even in voice mode — reading a two-page analysis
 #: aloud is worse than scannable text (and a >~45 s voice note is unwieldy). The agent is asked
 #: to keep spoken replies short; this is the backstop when it doesn't.
-# Strop pro čtení nahlas. Zvednutý z 600 (Petr 2026-08-01) – ale je to POJISTKA, ne cíl.
-# Smysl hlasového režimu je, aby uživatel nemusel číst; dlouhá hlasovka ten smysl ruší
-# stejně jako dlouhý text. Agent má psát KRATŠÍ, ne psát až sem.
+# Ceiling for reading aloud. Raised from 600 (2026-08-01), but it is a BACKSTOP, not a target.
+# The point of voice mode is that the user need not read; a long voice note defeats that just
+# like a long text does. The agent should write SHORTER, not write all the way up to here.
 VOICE_MAX_CHARS = 1200
 
 #: Outgoing phrases that PROMISE a follow-up message. Deliberately a fixed GUARANTEE list, not a
@@ -735,10 +735,10 @@ class AttachBridge:
                 # před uploadem, takže selhání sítě přílohu ztratilo (recenze Sol #6).
                 self._flush_files()
                 return
-        # Durable outbox eviduje KAŽDOU ČÁST zvlášť. Dřív se při selhání vracel do fronty
-        # celý text, takže už doručené části dorazily podruhé – Petr to vídal jako zdvojené
-        # úvodní odstavce dlouhých odpovědí (nález D; Sol i Fable ho našli nezávisle).
-        # Přílohy do fronty nešly vůbec a po restartu mizely (nález F).
+        # The durable outbox tracks EACH PART separately. Previously a failure re-queued the
+        # WHOLE text, so already-delivered parts arrived a second time — the user saw duplicated
+        # opening paragraphs of long replies (finding D; found independently in two reviews).
+        # Attachments weren't queued at all and vanished on restart (finding F).
         outbox = self._ensure_outbox()
         if outbox is not None:
             chunks = split_message(text) if text else []
@@ -781,12 +781,12 @@ class AttachBridge:
         if outbox is None:
             queue_path = getattr(self, "_queue_path", None)
             root = Path(queue_path).parent if queue_path is not None else _state_dir(self.cfg)
-            # VLASTNÍ podadresář, ne kořen stavu. DurableOutbox si pod předaným kořenem zakládá
-            # složku "outbox" – jenže `<state>/outbox` je zároveň složka, ze které se posílají
-            # uživatelské přílohy (Config.path_outbox). Leželo tam 5,7 MB Petrových souborů.
-            # Bez tohohle oddělení by je fronta počítala do své kvóty, cizí .json by přesunula
-            # do dead-letter a po 90 dnech smazala. Našel Sol při finální kontrole – jediný
-            # destruktivní nález celého dne, a to těsně před přepnutím.
+            # OWN subdirectory, not the state root. DurableOutbox creates an "outbox" folder
+            # under the root it is given — but `<state>/outbox` is ALSO the folder user
+            # attachments are sent from (Config.path_outbox). Real files were sitting there;
+            # without this separation the queue would count them against its quota, move the
+            # foreign .json files to dead-letter and delete them after 90 days. The single
+            # destructive finding of the review round, caught just before the switch.
             try:
                 outbox = DurableOutbox(root / "queue")
             except Exception as e:                     # doručování se nesmí zastavit
@@ -816,9 +816,9 @@ class AttachBridge:
                 try:
                     self._send_one_file(cesta)
                 except Exception as e:
-                    # Omezené opakování: bez něj by jedna vadná příloha (soubor nad limit,
-                    # smazaný soubor, HTTP 400) držela hlavu FIFO fronty navždy a Petrovi
-                    # by nedorazila ŽÁDNÁ další odpověď (Fable F2).
+                    # Bounded retries: without them one bad attachment (over the size limit,
+                    # a deleted file, HTTP 400) would hold the head of the FIFO queue forever
+                    # and NO further reply would reach the user (finding F2).
                     pokusu = outbox.fail(rec.record_id, f"{cesta}: {e}")
                     log.warning("doručení přílohy %s selhalo (%d/%d): %s",
                                 cesta, pokusu, OUTBOX_MAX_ATTEMPTS, e)
@@ -890,8 +890,8 @@ class AttachBridge:
         self._inbound_queue.put((upd, record_id))
 
     def _inbound_inflight(self) -> set:
-        """Záznamy právě rozpracované ve frontě v paměti. Bez téhle evidence by
-        opakovaný pokus zařadil tutéž zprávu podruhé a Petr by ji dostal dvakrát."""
+        """Records currently in flight in the in-memory queue. Without this bookkeeping a
+        retry would enqueue the same message again and the user would receive it twice."""
         if not hasattr(self, "_inflight_ids"):
             self._inflight_ids = set()
         return self._inflight_ids
@@ -1062,10 +1062,11 @@ class AttachBridge:
             text = self._transcribe(msg.get("voice") or msg.get("audio"), chat_id) or text
             if not text:
                 return True
-            # Agent MUSÍ vědět, že čte strojový přepis, ne psaný text. Bez toho bere přepis
-            # jako doslovné znění a u chyby rozpozná nesmysl místo překlepu: 2026-08-01 se
-            # Petrova hlasovka přepsala do čínštiny a já mu tvrdila, že dorazila přesně tak,
-            # jak ji poslal. S touhle značkou bych rovnou hádala podle kontextu.
+            # The agent MUST know it is reading a machine transcript, not written text. Without
+            # this it treats the transcript as verbatim and, on an error, sees nonsense instead
+            # of a mis-recognition: a voice note once transcribed into the wrong language entirely
+            # and the agent insisted it had arrived exactly as sent. With this marker it can guess
+            # from context instead.
             text = f"[voice transcript – may contain recognition errors]\n{text}"
         elif msg.get("photo") or msg.get("document"):
             note = self._download_note(msg, chat_id)
@@ -1086,31 +1087,31 @@ class AttachBridge:
         return True
 
     def _prepend_reply_context(self, msg: dict, text: str) -> str:
-        """Když uživatel odpovídá na konkrétní zprávu, řekni agentovi na kterou.
+        """When the user replies to a specific message, tell the agent which one.
 
-        Bez tohohle dostane agent jen holý text a musí hádat z kontextu. U krátkého
-        "tohle oprav" pod automatickým hlášením je to k neuhodnutí (Petr 2026-07-31).
-        Značka je anglicky, protože ji píše nástroj, ne agent.
+        Without this the agent gets only the bare text and has to guess from context. For a
+        terse "fix this" under an automated notice it is impossible to guess. The marker is in
+        English because the tool writes it, not the agent.
         """
-        puvodni = msg.get("reply_to_message") or {}
-        citace = (puvodni.get("text") or puvodni.get("caption") or "").strip()
-        if not citace:
+        replied_to = msg.get("reply_to_message") or {}
+        quote = (replied_to.get("text") or replied_to.get("caption") or "").strip()
+        if not quote:
             return text
-        citace = " ".join(citace.split())
-        if len(citace) > REPLY_QUOTE_CHARS:
-            citace = citace[:REPLY_QUOTE_CHARS] + "…"
-        return f"[replying to: {citace}]\n{text}"
+        quote = " ".join(quote.split())
+        if len(quote) > REPLY_QUOTE_CHARS:
+            quote = quote[:REPLY_QUOTE_CHARS] + "…"
+        return f"[replying to: {quote}]\n{text}"
 
     def _maybe_ack_queued(self, upd: dict) -> None:
-        """Potvrdí příjem zprávy, která přišla během rozdělané práce.
+        """Acknowledge a message that arrived while work was already in progress.
 
-        Text hlášky je ANGLICKY, i když spolu s Petrem mluvíme česky: tuhle zprávu píše
-        bridge sám, ne agent, a bridge je nástroj pro kohokoli (Petr ho instaluje lidem
-        na webináři). Odpovědi agenta jazyk konverzace samozřejmě drží – tohle je jediné
-        místo, kde mluví samotný nástroj.
+        The notice text is ENGLISH even when the conversation is in another language: the bridge
+        itself writes this, not the agent, and the bridge is a tool for anyone (it gets installed
+        for other people). The agent's own replies of course follow the conversation's language —
+        this is the one place the tool itself speaks.
         """
         if not self._turn_active.is_set():
-            log.debug("ACK nezaslán: žádný turn neběží")
+            log.debug("ACK not sent: no turn in progress")
             return
         msg = upd.get("message") or upd.get("edited_message") or {}
         if msg.get("from", {}).get("id") not in self._allowed:
@@ -1165,13 +1166,13 @@ class AttachBridge:
     def _inject(self, text: str) -> bool:
         """Doručí zprávu do session. Selhání NIKDY nesmí být tiché.
 
-        Dřív se selhaný zápis do tmuxu jen zalogoval a zpráva zmizela – uživatel se
-        nedozvěděl nic. Doloženo z provozu 31. 7.:
-            19:04:41 ERROR inject failed: '[TG] Jsi tam tedy?' timed out after 10 seconds
-        Petr tu zprávu poslal a odpovědi se nedočkal; nikde po ní nezůstala stopa.
+        Previously a failed write to tmux was only logged and the message vanished — the user
+        learned nothing. Seen in production:
+            19:04:41 ERROR inject failed: '[TG] are you there?' timed out after 10 seconds
+        The user sent that message and never got a reply; no trace was left of it.
 
-        Zápis do tmuxu selhává i přechodně (zaneprázdněné okno, plný buffer), proto se
-        opakuje. Když ani opakování nepomůže, uživatel se to musí dozvědět.
+        A write to tmux can fail transiently (busy pane, full buffer), so it is retried. When
+        even the retries don't help, the user has to be told.
         """
         self._turn_active.set()
         self._last_activity = time.monotonic()   # keep typing lit from the very start
@@ -1528,9 +1529,9 @@ class AttachBridge:
         self._finish_turn()
 
     # ---- unfulfilled-promise watchdog -------------------------------------
-    # "Nestačí to říct v promptu, je tam potřeba vrstva kontroly" (Petr 2026-08-01): when a reply
-    # promises a follow-up and none comes, remind the AGENT — the user should get the missing
-    # message, not an apology from the tool.
+    # Saying it in the prompt isn't enough; a control layer is needed. When a reply promises a
+    # follow-up and none comes, remind the AGENT — the user should get the missing message, not
+    # an apology from the tool.
     @staticmethod
     def _detect_promise(text: str) -> str | None:
         low = (text or "").lower()
