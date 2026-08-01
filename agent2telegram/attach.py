@@ -516,8 +516,8 @@ class AttachBridge:
                 os.fsync(f.fileno())
             return True
         except OSError as e:
-            log.error("ledger doručených zpráv se nepodařilo zapsat (%s) – "
-                      "záznam nechávám ve frontě, ať se odpověď neodešle dvakrát", e)
+            log.error("could not write the delivered-message ledger (%s) — keeping the record queued "
+                      "so the reply is not sent twice", e)
             return False
 
     # ---- inbound update persistence -----------------------------------------
@@ -544,7 +544,7 @@ class AttachBridge:
             try:
                 inbox = DurableInbox(self._offset_file.parent)
             except Exception as e:                     # nesmí shodit příjem zpráv
-                log.error("durable inbox se nepodařilo otevřít: %s", e)
+                log.error("could not open the durable inbox: %s", e)
                 inbox = None
             self._inbox = inbox
         return inbox
@@ -646,12 +646,12 @@ class AttachBridge:
             # Bez trvalého úložiště se offset posunout NESMÍ. Dřív se v tomhle případě
             # pokračovalo po staré ztrátové cestě – tedy přesně tehdy, když je disk plný
             # nebo poškozený a durabilita je nejpotřebnější (recenze Sol #2).
-            log.error("update %s: trvalé úložiště není k dispozici, offset neposouvám", update_id)
+            log.error("update %s: durable storage unavailable, not advancing the offset", update_id)
             return offset
         try:
             record_id = inbox.reserve(upd)
         except Exception as e:
-            log.error("update %s se nepodařilo uložit, offset neposouvám: %s", update_id, e)
+            log.error("could not store update %s, not advancing the offset: %s", update_id, e)
             return offset
         self._save_offset(next_offset)
         # Potvrdit příjem MUSÍ poller, ne worker: worker zpracovává zprávy po jedné, takže
@@ -746,7 +746,7 @@ class AttachBridge:
             try:
                 outbox.enqueue(chunks, soubory, key)
             except Exception as e:
-                log.error("odchozí zprávu se nepodařilo uložit, jedu starou cestou: %s", e)
+                log.error("could not persist the outgoing reply, falling back to the old path: %s", e)
             else:
                 self._pending_files = []
                 if turn_text:
@@ -790,7 +790,7 @@ class AttachBridge:
             try:
                 outbox = DurableOutbox(root / "queue")
             except Exception as e:                     # doručování se nesmí zastavit
-                log.error("durable outbox se nepodařilo otevřít: %s", e)
+                log.error("could not open the durable outbox: %s", e)
                 outbox = None
             self._outbox = outbox
         return outbox
@@ -808,7 +808,7 @@ class AttachBridge:
                 try:
                     self.tg.send_message(self._owner_chat, chunk)
                 except Exception as e:
-                    log.warning("doručení části %d stále selhává: %s", index, e)
+                    log.warning("delivery of part %d still failing: %s", index, e)
                     return
                 outbox.mark_chunk_sent(rec.record_id, index)
             vzdano = False
@@ -820,7 +820,7 @@ class AttachBridge:
                     # a deleted file, HTTP 400) would hold the head of the FIFO queue forever
                     # and NO further reply would reach the user (finding F2).
                     pokusu = outbox.fail(rec.record_id, f"{cesta}: {e}")
-                    log.warning("doručení přílohy %s selhalo (%d/%d): %s",
+                    log.warning("delivery of attachment %s failed (%d/%d): %s",
                                 cesta, pokusu, OUTBOX_MAX_ATTEMPTS, e)
                     if pokusu >= OUTBOX_MAX_ATTEMPTS:
                         # NESMÍ se použít mark_file_sent: to by do vlastní evidence zapsalo,
@@ -831,7 +831,7 @@ class AttachBridge:
                         # zůstane dohledatelný i s tím, které části se doručit stihly.
                         self._ohlas_trvale_odmitnuti(Path(cesta).name, str(e))
                         outbox.give_up(rec.record_id, f"příloha {cesta}: {e}")
-                        log.error("příloha %s se vzdala po %d pokusech → dead-letter",
+                        log.error("attachment %s gave up after %d attempts → dead-letter",
                                   cesta, pokusu)
                         vzdano = True
                         break
@@ -844,7 +844,7 @@ class AttachBridge:
                 # označené, takže se neposílají znovu; příští cyklus jen zkusí dokončit.
                 return
             outbox.done(rec.record_id)
-            log.info("FWD (doručeno) %d částí, %d příloh",
+            log.info("FWD (delivered) %d parts, %d attachments",
                      len(rec.chunks), len(rec.files))
 
         while self._pending_send and self._owner_chat is not None:
@@ -909,14 +909,14 @@ class AttachBridge:
         try:
             cekajici = inbox.pending()
         except Exception as e:
-            log.error("nepodařilo se přečíst zbylé příchozí zprávy: %s", e)
+            log.error("could not read the leftover inbound messages: %s", e)
             return 0
         rozpracovane = self._inbound_inflight()
         cekajici = [r for r in cekajici if r.record_id not in rozpracovane]
         for rec in cekajici:
             self._submit_inbound_update(rec.update, rec.record_id)
         if cekajici:
-            log.info("po startu doručuji %d zprávu/y, které zbyly z minula", len(cekajici))
+            log.info("delivering %d message(s) left over from before restart", len(cekajici))
         return len(cekajici)
 
     def _inbound_worker_loop(self) -> None:
@@ -953,7 +953,7 @@ class AttachBridge:
             try:
                 inbox.done(record_id)
             except Exception as e:
-                log.warning("úklid doručeného záznamu %s selhal: %s", record_id, e)
+                log.warning("cleanup of delivered record %s failed: %s", record_id, e)
 
     def _inbound_failed(self, record_id: str | None, duvod: str) -> None:
         """Nedoručeno → záznam zůstává a zkusí se znovu. Po vyčerpání pokusů jde do
@@ -966,10 +966,10 @@ class AttachBridge:
             pokusu = inbox.fail(record_id, duvod)
             if pokusu >= INBOUND_MAX_ATTEMPTS:
                 inbox.give_up(record_id, f"{duvod} (po {pokusu} pokusech)")
-                log.error("update %s se nepodařilo doručit ani na %d. pokus → dead-letter",
+                log.error("update %s could not be delivered even on attempt %d → dead-letter",
                           record_id, pokusu)
         except Exception as e:
-            log.warning("označení nedoručeného záznamu %s selhalo: %s", record_id, e)
+            log.warning("marking undelivered record %s failed: %s", record_id, e)
 
     def _inbound_loop(self) -> None:
         self._start_inbound_worker()
@@ -994,18 +994,18 @@ class AttachBridge:
                     # sebe-zotavující se VPN-DNS blip.
                     transient_fails += 1
                     if transient_fails >= 10 and not outage_alerted:
-                        log.error("getUpdates network výpadek (%d× v řadě) trvá déle: %s",
+                        log.error("getUpdates network outage (%d in a row) is lasting: %s",
                                   transient_fails, e)
                         outage_alerted = True
                     else:
-                        log.warning("getUpdates přechodná síťová chyba (%d): %s", transient_fails, e)
+                        log.warning("getUpdates transient network error (%d): %s", transient_fails, e)
                     self._stop.wait(min(3 * transient_fails, 30))
                     continue
-                log.error("getUpdates failed: %s", e)   # skutečná (ne-síťová) chyba
+                log.error("getUpdates failed: %s", e)   # a real (non-network) error
                 self._stop.wait(3)
                 continue
             if outage_alerted:
-                log.info("getUpdates síť obnovena po %d chybách", transient_fails)
+                log.info("getUpdates network recovered after %d errors", transient_fails)
             transient_fails = 0
             outage_alerted = False
             for upd in updates:
@@ -1133,9 +1133,9 @@ class AttachBridge:
                                           "I finish what I'm on.")
             # Logovat MUSÍ: bez záznamu nejde po incidentu zjistit, jestli potvrzení odešlo.
             # 31. 7. jsem kvůli tomu nedokázala rozhodnout, jestli feature funguje.
-            log.info("ACK příjmu odeslán (běží jiný turn)")
+            log.info("receipt ACK sent (another turn is running)")
         except Exception as e:
-            log.warning("potvrzení příjmu se nepodařilo odeslat: %s", e)
+            log.warning("could not send the receipt ACK: %s", e)
 
     def _begin_turn(self) -> None:
         # Light "typing…" from the actual injection point.
@@ -1181,7 +1181,7 @@ class AttachBridge:
             try:
                 self._session.inject(text)
                 if pokus > 1:
-                    log.info("inject prošel až na %d. pokus", pokus)
+                    log.info("inject succeeded on attempt %d", pokus)
                 return True
             except SessionError as e:
                 posledni_chyba = e
@@ -1787,11 +1787,11 @@ class AttachBridge:
     def _ohlas_trvale_odmitnuti(self, jmeno: str, duvod: str) -> None:
         """Přílohu, kterou nemá smysl zkoušet znovu, ohlásí a bere za vyřízenou.
         Tiché zahození by bylo horší než viditelná chyba – a ucpaná fronta ještě horší."""
-        log.warning("přílohu %s neposílám: %s", jmeno, duvod)
+        log.warning("refusing to send attachment %s: %s", jmeno, duvod)
         try:
             self.tg.send_message(self._owner_chat, f"⚠️ Couldn't send {jmeno}: {duvod}")
         except Exception as e:
-            log.warning("nešlo ohlásit odmítnutou přílohu: %s", e)
+            log.warning("could not report the rejected attachment: %s", e)
 
     def _flush_files(self) -> None:
         """Upload whatever the last reply asked for. Kept separate from the text path so a
