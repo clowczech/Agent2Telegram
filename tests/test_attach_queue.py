@@ -226,7 +226,11 @@ class AttachInboundTests(unittest.TestCase):
                 release_stt.set()
                 _wait_inbound(b)
 
-                self.assertEqual(b._session.injected, ["voice text"])
+                # Přepis je od 2026-08-01 označený jako strojový, ať ho agent nebere doslova
+                # (Petrova hlasovka se přepsala do čínštiny). Kontrolujeme text i značku.
+                self.assertEqual(len(b._session.injected), 1)
+                self.assertIn("voice text", b._session.injected[0])
+                self.assertIn("voice transcript", b._session.injected[0])
             finally:
                 stt.transcribe = orig
                 release_stt.set()
