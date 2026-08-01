@@ -93,8 +93,18 @@ BOT_COMMANDS = [
     {"command": "help", "description": "Intro and what you can send"},
     {"command": "status", "description": "Connection and voice status"},
     {"command": "setkey", "description": "Enable voice (your ElevenLabs API key)"},
+    {"command": "voice", "description": "Toggle spoken (voice-note) replies"},
     {"command": "id", "description": "Show your Telegram id"},
 ]
+
+#: Injected ahead of the user's message while voice mode is ON, so the AGENT writes a reply meant
+#: to be HEARD rather than read. This marker — not a regex — is the heart of voice mode: the model
+#: phrases speakable text (short, numbers as words, no paths) far better than any post-processing.
+#: Same idea as the "[voice transcript …]" marker on the inbound side.
+VOICE_MODE_HINT = (
+    "[voice mode ON — your reply will be read aloud as a voice note. Write it to be HEARD: "
+    "short and conversational, numbers as words, no markdown, tables, code, file paths or URLs.]"
+)
 
 import re as _re  # noqa: E402
 from .readers import _short  # noqa: E402
@@ -203,6 +213,9 @@ class AttachBridge:
         self._stop = threading.Event()
         self._init_inbound_worker_state()
         self._init_update_state()
+        # Voice-reply mode is persisted in the state dir (survives restart), not just memory.
+        self._voice_state_path = _state_dir(self.cfg) / "voice_mode"
+        self._voice_on = self._load_voice_state()
         # Persisted ledger of already-forwarded message uuids — survives restarts/crashes/reboots
         # so resuming an interrupted turn never re-sends what was already delivered.
         self._sent_path = Path.home() / ".config" / "agent2telegram" / "attach_sent.txt"
@@ -1015,6 +1028,10 @@ class AttachBridge:
             text = f"{text}\n{note}".strip()
         if text:
             text = self._prepend_reply_context(msg, text)
+            if self._voice_reply_on():
+                # Tell the agent to write for the EAR, not the eye. This is the core of voice
+                # mode — the model phrases speakable text far better than any post-processing.
+                text = f"{VOICE_MODE_HINT}\n{text}"
             text = self._limit_inbound_prompt(text, chat_id)
             if not text:
                 return True
@@ -1180,20 +1197,59 @@ class AttachBridge:
                 "progress, what tools it runs, and the reply. You can also send *photos* and "
                 "*files*, and react with ❤️ as quick feedback.\n\n"
                 f"🎤 Voice transcription: {voice}.\n\n"
-                "Commands: /help · /status · /id · /setkey")
+                "Commands: /help · /status · /id · /setkey · /voice")
             return True
         if cmd == "id":
             self.tg.send_message(chat_id, f"Your Telegram id: `{chat_id}`")
             return True
         if cmd == "status":
             voice = "✓" if self.cfg.elevenlabs_api_key else "✗"
+            replies = "🔊 on" if self._voice_reply_on() else "🔇 off"
             self.tg.send_message(chat_id,
                 f"✅ Connected — *{agent}* in tmux session `{self.cfg.tmux_session}`.\n"
-                f"🎤 Voice (ElevenLabs): {voice}")
+                f"🎤 Voice transcription (ElevenLabs): {voice}\n"
+                f"🗣️ Voice replies (/voice): {replies}")
             return True
         if cmd == "setkey":
             return self._set_voice_key(arg, chat_id, message_id)
+        if cmd == "voice":
+            return self._toggle_voice(chat_id)
         return False    # unknown command → let the agent handle it
+
+    # ---- voice-reply mode ----------------------------------------------------
+    def _load_voice_state(self) -> bool:
+        try:
+            return self._voice_state_path.read_text("utf-8").strip() == "on"
+        except OSError:
+            return False
+
+    def _voice_reply_on(self) -> bool:
+        """Voice replies only when the switch is on AND a key exists to actually synthesize."""
+        return bool(getattr(self, "_voice_on", False) and self.cfg.elevenlabs_api_key)
+
+    def _set_voice_state(self, on: bool) -> None:
+        self._voice_on = on
+        try:
+            self._voice_state_path.parent.mkdir(parents=True, exist_ok=True)
+            tmp = self._voice_state_path.parent / (self._voice_state_path.name + ".tmp")
+            tmp.write_text("on" if on else "off", encoding="utf-8")
+            tmp.replace(self._voice_state_path)          # atomic persist
+        except OSError as e:
+            log.warning("could not persist voice-mode state: %s", e)
+
+    def _toggle_voice(self, chat_id: int) -> bool:
+        if not self.cfg.elevenlabs_api_key:
+            self.tg.send_message(chat_id,
+                "🔊 Voice replies need an ElevenLabs key first. Add one with /setkey, then /voice.")
+            return True
+        new_state = not bool(getattr(self, "_voice_on", False))
+        self._set_voice_state(new_state)
+        self.tg.send_message(chat_id,
+            "🔊 Voice replies ON — I'll answer with voice notes. Long or table-heavy replies still "
+            "come as text. /voice again to turn off."
+            if new_state else
+            "🔇 Voice replies OFF — back to text.")
+        return True
 
     def _set_voice_key(self, key: str, chat_id: int, message_id: int | None) -> bool:
         """Save an ElevenLabs key to enable voice, then delete the message so the secret isn't
