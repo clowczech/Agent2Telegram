@@ -111,21 +111,20 @@ class Config:
 
 
 def _state_dir(cfg=None) -> Path:
-    """Adresář se stavem bridge. Výchozí cesta je ZÁMĚRNĚ společná.
+    """Bridge state directory. The default path is DELIBERATELY shared.
 
-    Souběh dvou instancí nad jedním adresářem hlídá single-instance zámek
-    (`compat.single_instance_lock`, viz `AttachBridge._instance_lock`): druhá instance
-    skončí jasnou hláškou s odkazem na `AGENT2TELEGRAM_STATE`, ne tichým sdílením offsetu.
-    Explicitně nastavená `AGENT2TELEGRAM_STATE` má přednost – keepalive ji nastavuje
-    každému bridgi zvlášť.
+    Two instances over one directory are guarded by the single-instance lock
+    (`compat.single_instance_lock`, see `AttachBridge._instance_lock`): the second exits with a
+    clear message pointing at `AGENT2TELEGRAM_STATE` instead of silently sharing the offset.
+    An explicit `AGENT2TELEGRAM_STATE` takes precedence — a keepalive sets it per bridge.
 
-    Proč NE per-bot výchozí cesta (zamítnutá oprava K): pomohla by jedině tomu, kdo běží
-    bez env a zároveň provozuje dva RŮZNÉ boty – takový nikdo není (flotila má env,
-    webinář jednoho bota) – a přitom by rozbila upgrade běžící instalace: nový prázdný
-    per-bot adresář znamená reset offsetu → replay celého backlogu z Telegramu a osiřelou
-    durable frontu ve staré cestě. Bezpečná migrace stará→nová z dat nejde (nelze určit,
-    komu společný adresář patřil). Loud-fail přes zámek je jednodušší a bezpečnější.
-    `cfg` se ponechává v signatuře kvůli volajícím, ale identitu bota už do cesty nebere.
+    Why NOT a per-bot default path (a rejected change): it would help only someone running
+    without the env var AND operating two DIFFERENT bots — nobody does that (a fleet sets the
+    env, a single install runs one bot) — while breaking upgrades of a running install: a fresh
+    empty per-bot directory means the offset resets → the whole Telegram backlog replays and the
+    durable queue in the old path is orphaned. A safe old→new migration is impossible from the
+    data (you can't tell which bot a shared directory belonged to). Failing loud via the lock is
+    simpler and safer. `cfg` stays in the signature for callers but no longer enters the path.
     """
     env = os.environ.get("AGENT2TELEGRAM_STATE")
     if env:

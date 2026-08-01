@@ -77,23 +77,23 @@ class Bridge:
                 updates = self.tg.get_updates(offset, timeout=self.cfg.poll_timeout)
             except (TelegramError, OSError) as e:
                 if is_network_error(e):
-                    # Přechodný/výpadkový síťový/DNS problém (Errno 8, connection reset,
-                    # timeout) – bridge se sám zotaví. WARNING + backoff; ERROR jen JEDNOU
-                    # při delším výpadku, ať monitoring nealertuje na sebe-zotavující se blip.
+                    # Transient network/DNS problem (Errno 8, connection reset, timeout) — the
+                    # bridge recovers on its own. WARNING + backoff; ERROR only ONCE during a
+                    # longer outage, so monitoring doesn't alert on a self-healing blip.
                     transient_fails += 1
                     if transient_fails >= 10 and not outage_alerted:
-                        log.error("getUpdates network výpadek (%d× v řadě) trvá déle: %s",
+                        log.error("getUpdates network outage (%d in a row) is lasting: %s",
                                   transient_fails, e)
                         outage_alerted = True
                     else:
-                        log.warning("getUpdates přechodná síťová chyba (%d): %s", transient_fails, e)
+                        log.warning("getUpdates transient network error (%d): %s", transient_fails, e)
                     self._stop.wait(min(3 * transient_fails, 30))
                     continue
-                log.error("getUpdates failed: %s", e)     # skutečná (ne-síťová) chyba
+                log.error("getUpdates failed: %s", e)     # a real (non-network) error
                 self._stop.wait(3)
                 continue
             if outage_alerted:
-                log.info("getUpdates síť obnovena po %d chybách", transient_fails)
+                log.info("getUpdates network recovered after %d errors", transient_fails)
             transient_fails = 0
             outage_alerted = False
             for upd in updates:

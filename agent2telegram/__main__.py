@@ -289,9 +289,9 @@ if __name__ == "__main__":
     except KeyboardInterrupt:
         sys.exit(130)
     except (SessionError, ConfigError) as e:
-        # Chybějící tmux nebo špatná konfigurace NENÍ pád programu – je to něco, co má
-        # uživatel udělat. Traceback tady jen děsí: člověk, který bridge instaluje poprvé,
-        # z něj vyčte "rozbilo se to", místo "doinstaluj tmux". Hláška té výjimky už tu
-        # radu obsahuje, tak ji ukážeme samotnou. (Instalace naslepo na Ubuntu, Fable 2026-07-31.)
+        # Missing tmux or a bad config is NOT a program crash — it is something the user has to
+        # do. A traceback here only scares: a first-time installer reads "it broke" instead of
+        # "install tmux". The exception's message already carries that advice, so show it on its
+        # own. (From walking the install on a clean Ubuntu.)
         print(f"\n{e}\n", file=sys.stderr)
         sys.exit(2)

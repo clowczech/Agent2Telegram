@@ -55,8 +55,8 @@ class StreamBridge(AttachBridge):
     """Codex via ``codex exec --json``. Reuses AttachBridge's Telegram side; replaces the
     transcript-tailing source with a live subprocess event stream."""
     _turn_end_backstop_enabled = False
-    # Vlastní fronta vedle configů a jiný životní cyklus – durable outbox je zatím
-    # jen pro attach mód, ať se stream nemění bez zadání a bez vlastních testů.
+    # Its own queue alongside the configs and a different lifecycle — the durable outbox is for
+    # attach mode only for now, so stream isn't changed without its own spec and tests.
     _use_durable_outbox = False
 
     @staticmethod

@@ -121,10 +121,10 @@ class TelegramError(Exception):
 
 
 def is_network_error(exc: BaseException) -> bool:
-    """True pro přechodný síťový/DNS problém – ať přímý (OSError/URLError/timeout,
-    včetně gaierror „nodename nor servname"/Errno 8), nebo zabalený v ``TelegramError``
-    (``__cause__``). ``json.JSONDecodeError`` = malformovaná odpověď = také přechodné.
-    Slouží k tomu, aby se sebe-zotavující se výpadky nelogovaly jako ERROR (monitoring alert)."""
+    """True for a transient network/DNS problem — whether direct (OSError/URLError/timeout,
+    including gaierror "nodename nor servname"/Errno 8) or wrapped in ``TelegramError``
+    (``__cause__``). ``json.JSONDecodeError`` = a malformed response = also transient. Used so
+    self-healing outages are not logged as ERROR (which would trip a monitoring alert)."""
     if isinstance(exc, OSError):
         return True
     cause = getattr(exc, "__cause__", None)
