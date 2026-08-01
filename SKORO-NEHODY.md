@@ -111,3 +111,23 @@ je to horší, než to vypadá.
 s konkrétní dobou („bude ticho asi minutu, je to plánované, ozvu se hned potom"). A pokud možno
 poslat ji cestou, která přeruší nebude – tedy `notify_petr.sh` z pozadí, ne z turnu, který se
 zásahem skončí.
+
+---
+
+## 2026-08-01 · Testovací nástroj otevřel DNS na všech rozhraních
+
+**Co se stalo:** kvůli testům na Ubuntu jsem 31. 7. nastartovala Colimu. Ta otevřela
+rekurzivní DNS (`limactl` na `*:53`) na **všech rozhraních**, ne jen na loopbacku. Noční
+bezpečnostní audit to označil červeně.
+
+**Proč to prošlo:** startovala jsem nástroj kvůli jedné úloze a neptala se, co dalšího otevře.
+Testovací prostředí jsem posuzovala jako neškodné, protože „jen spouští testy".
+
+**Škoda:** žádná známá, ale otevřený resolver je zneužitelný zvenčí a běžel ~18 hodin.
+
+**Co to příště chytne:** nástroj nastartovaný kvůli jedné úloze se po ní **zastaví**, ne nechá
+běžet „pro jistotu". A po spuštění čehokoli, co vytváří virtuální stroj nebo kontejnery, zkontrolovat
+`lsof -nP -iTCP -sTCP:LISTEN` – co nového poslouchá a na jakém rozhraní.
+
+Vyřešeno: `colima stop`, port ověřeně zavřený. Pro další testy na Linuxu ji nastartuju znovu
+a hned potom zastavím.
