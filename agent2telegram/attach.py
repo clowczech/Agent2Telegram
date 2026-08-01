@@ -44,27 +44,28 @@ log = logging.getLogger("agent2telegram.attach")
 #: the Stop-hook turn-end marker never arrives. The marker is the primary, precise signal —
 #: this just stops "typing…" from hanging forever if the hook is missing/misconfigured.
 IDLE_DONE = 90.0
-# Zápis do tmuxu selhává i přechodně (zaneprázdněné okno, plný buffer), tak se opakuje.
-# Krátká pauza záměrně: zpráva od uživatele nesmí čekat déle, než kolik trvá jeho trpělivost.
+# A write to tmux can fail transiently (busy pane, full buffer), so it is retried.
+# A short pause on purpose: a user's message must not wait longer than the user's patience.
 INJECT_ATTEMPTS = 3
 INJECT_RETRY_WAIT = 1.5
-# Kolikrát se zkusí doručit uložená příchozí zpráva, než skončí v dead-letter.
-# Radši ji tam odložit s důvodem než ji smazat – aspoň je dohledatelná.
+# How many times a stored inbound message is retried before it lands in dead-letter.
+# Better to shelve it there with a reason than delete it — at least it stays traceable.
 INBOUND_MAX_ATTEMPTS = 5
-# Kolikrát se opakuje odchozí příloha, než se vzdá. Bez stropu by jedna vadná příloha
-# držela hlavu FIFO fronty navždy a zablokovala všechny další odpovědi.
+# How many times an outgoing attachment is retried before giving up. Without a cap one bad
+# attachment would hold the head of the FIFO queue forever and block every later reply.
 OUTBOX_MAX_ATTEMPTS = 3
-# Jak často se za BĚHU zkusí znovu doručit zpráva, která zůstala v trvalém úložišti.
-# Bez toho se čekalo na restart – u služby běžící týdny prakticky navždy (revize Sol #1).
+# How often a message left in durable storage is retried WHILE RUNNING. Without this it waited
+# for a restart — for a service running for weeks, effectively forever (review finding #1).
 INBOUND_RETRY_INTERVAL = 30.0
-# Jak často odchozí smyčka kontroluje, jestli je co poslat. Bylo 0,4 s; zkráceno na 0,15 s,
-# protože při dlouhé práci s desítkami průběžných zpráv se to sčítalo do znatelného zpoždění.
-# Cena je častější čtení fronty – proto se to měřilo, ne odhadovalo (viz níže v commitu).
+# How often the outbound loop checks whether there is anything to send. Was 0.4 s; shortened to
+# 0.15 s, because over long work with dozens of progress messages it added up to a noticeable
+# delay. The cost is reading the queue more often — so it was measured, not guessed.
 OUTBOUND_TICK = 0.15
-# Jak dlouho po potvrzení příjmu se další potvrzení neposílá. Pět zpráv za sebou má vyvolat
-# jedno "mám to", ne pět.
+# How long after a receipt ACK no further ACK is sent. Five messages in a row should trigger
+# one "got it", not five.
 QUEUE_ACK_COOLDOWN = 30.0
-# Kolik znaků citované zprávy se agentovi předá. Dost na rozpoznání, málo na zahlcení promptu.
+# How many characters of a quoted message are passed to the agent. Enough to recognise, few
+# enough not to flood the prompt.
 REPLY_QUOTE_CHARS = 300
 #: How often we re-assert the "typing…" chat action (Telegram shows it for ~5s). Kept well
 #: under that window so a turn never shows a gap, even right after a sent message clears it.
@@ -200,8 +201,8 @@ def _expected_agent_commands(cfg: Config) -> list[str]:
 
 class AttachBridge:
     _turn_end_backstop_enabled = True
-    #: Durable outbox s potvrzením po částech. Podtřídy s vlastní frontou (StreamBridge)
-    #: ho vypínají – sdílejí tenhle kód, ale ne jeho životní cyklus.
+    #: Durable outbox with per-part confirmation. Subclasses with their own queue (StreamBridge)
+    #: turn it off — they share this code but not its lifecycle.
     _use_durable_outbox = True
 
     def __init__(self, cfg: Config, *, client: TelegramClient | None = None) -> None:
@@ -417,10 +418,10 @@ class AttachBridge:
 
     # ---- lifecycle ---------------------------------------------------------
     def run(self) -> None:
-        # Zámek na state dir. Dvě instance nad jedním botem se perou o getUpdates (409),
-        # obě mohou injektovat tentýž update a obě drainovat stejnou frontu – zprávy pak
-        # mizí i duplikují. Zámek byl v compat.py napsaný a otestovaný, ale nikdy se
-        # nevolal (křížová recenze: Sol #3, Fable F3), takže ta ochrana byla jen na papíře.
+        # Lock on the state dir. Two instances over one bot fight over getUpdates (409), both
+        # can inject the same update and both drain the same queue — messages then vanish and
+        # duplicate. The lock was written and tested in compat.py but never called (cross-review
+        # findings #3 / F3), so that protection was only on paper.
         with self._instance_lock():
             self._run_locked()
 
@@ -435,9 +436,9 @@ class AttachBridge:
                 yield
         except AlreadyRunning:
             raise RuntimeError(
-                f"Nad stavem {Path(cesta).parent} už běží jiná instance bridge. "
-                "Dvě naráz si přetahují zprávy – ukonči tu druhou, nebo dej každé "
-                "vlastní AGENT2TELEGRAM_STATE."
+                f"Another bridge instance is already running over the state at {Path(cesta).parent}. "
+                "Two at once fight over messages — stop the other one, or give each its "
+                "own AGENT2TELEGRAM_STATE."
             ) from None
 
     def _run_locked(self) -> None:
@@ -496,12 +497,13 @@ class AttachBridge:
             self._turn_from_tg = from_tg
 
     def _mark_sent(self, uuid: str) -> bool:
-        """Zapíše uuid doručené zprávy do paměti i na disk. Vrací, jestli zápis na disk vyšel.
+        """Record a delivered message uuid in memory and on disk. Returns whether the disk write
+        succeeded.
 
-        Návratová hodnota je podstatná: dřív se `OSError` tiše spolkl, takže klíč zůstal jen
-        v paměti. Volající pak smazal záznam z fronty a po restartu se TÁŽ odpověď odeslala
-        znovu – tedy duplicita přesně ve chvíli, kdy je disk plný. Našel Sol při finální
-        kontrole se slovy, že oprava pořadí zápisu je "jen naoko"; měl pravdu.
+        The return value matters: an `OSError` used to be swallowed silently, so the key stayed
+        only in memory. The caller then removed the record from the queue and after a restart the
+        SAME reply was sent again — a duplicate at exactly the moment the disk is full. A review
+        called the earlier write-order fix "only skin-deep"; it was right.
         """
         if not uuid:
             return True
@@ -537,13 +539,13 @@ class AttachBridge:
         self._ensure_inbox()
 
     def _ensure_inbox(self) -> DurableInbox | None:
-        """Durable inbox nad TÍMŽ adresářem, kde leží offset – ať se v testech i v provozu
-        stav drží pohromadě a nezáleží na tom, kdo objekt složil."""
+        """Durable inbox over the SAME directory the offset lives in — so state stays together
+        in tests and in production regardless of who assembled the object."""
         inbox = getattr(self, "_inbox", None)
         if inbox is None:
             try:
                 inbox = DurableInbox(self._offset_file.parent)
-            except Exception as e:                     # nesmí shodit příjem zpráv
+            except Exception as e:                     # must not break message intake
                 log.error("could not open the durable inbox: %s", e)
                 inbox = None
             self._inbox = inbox
@@ -634,18 +636,18 @@ class AttachBridge:
             self._save_offset(next_offset)
             return next_offset
 
-        # POŘADÍ JE KRITICKÉ. Telegram bere update za vyřízený, jakmile si řekneme o vyšší
-        # offset – znovu ho nepošle nikdy. Dřív se offset posunul dřív, než zpráva doputovala
-        # kamkoli trvalého (sedla si jen do fronty v paměti), takže pád v tom okně ji smazal
-        # ze světa. Monitor bridge 30. 7. zabíjel 4× denně, takže to nebyla teorie.
+        # ORDER IS CRITICAL. Telegram treats an update as handled the moment we ask for a higher
+        # offset — it never resends it. The offset used to advance before the message reached
+        # anywhere durable (it only sat in the in-memory queue), so a crash in that window erased
+        # it. A monitor was killing the bridge several times a day, so this was not theoretical.
         #
-        # Nově: nejdřív zápis na disk, teprve pak ACK. Když zápis selže, offset se NEPOSUNE
-        # a Telegram nám zprávu pošle znovu – radši dvakrát než nikdy.
+        # Now: write to disk first, ACK only after. If the write fails the offset does NOT
+        # advance and Telegram resends the message — better twice than never.
         inbox = self._ensure_inbox()
         if inbox is None:
-            # Bez trvalého úložiště se offset posunout NESMÍ. Dřív se v tomhle případě
-            # pokračovalo po staré ztrátové cestě – tedy přesně tehdy, když je disk plný
-            # nebo poškozený a durabilita je nejpotřebnější (recenze Sol #2).
+            # Without durable storage the offset must NOT advance. This case used to fall through
+            # to the old lossy path — exactly when the disk is full or corrupt and durability is
+            # needed most (review finding #2).
             log.error("update %s: durable storage unavailable, not advancing the offset", update_id)
             return offset
         try:
@@ -654,9 +656,9 @@ class AttachBridge:
             log.error("could not store update %s, not advancing the offset: %s", update_id, e)
             return offset
         self._save_offset(next_offset)
-        # Potvrdit příjem MUSÍ poller, ne worker: worker zpracovává zprávy po jedné, takže
-        # druhá zpráva se ke slovu dostane až po dokončení první – potvrzení by přišlo pozdě
-        # a k ničemu. Ověřeno naživo 31. 7.: v původní podobě nedorazilo ani jednou.
+        # The POLLER must send the receipt ACK, not the worker: the worker handles messages one
+        # at a time, so a second message only gets its turn after the first finishes — the ACK
+        # would arrive late and useless. Confirmed live: in the original form it never arrived.
         self._maybe_ack_queued(upd)
         self._submit_inbound_update(upd, record_id)
         self._mark_update_processed(update_id)
@@ -730,9 +732,9 @@ class AttachBridge:
             if files:
                 self._pending_files = getattr(self, "_pending_files", []) + files
             if not text and self._ensure_outbox() is None:
-                # Jen bez durable fronty se jde starou cestou. Dřív tudy propadla KAŽDÁ
-                # odpověď složená jen z přílohy: _flush_files smaže cestu z paměti ještě
-                # před uploadem, takže selhání sítě přílohu ztratilo (recenze Sol #6).
+                # Only without the durable queue do we take the old path. EVERY attachment-only
+                # reply used to slip through here: _flush_files clears the path from memory before
+                # the upload, so a network failure lost the attachment (review finding #6).
                 self._flush_files()
                 return
         # The durable outbox tracks EACH PART separately. Previously a failure re-queued the
@@ -750,8 +752,8 @@ class AttachBridge:
             else:
                 self._pending_files = []
                 if turn_text:
-                    # Pro backstop je odpověď vyřízená už durable uložením.
-                    # Čekat na Telegram by při výpadku vytvořilo druhý stejný record.
+                    # For the backstop the reply is handled once it is durably stored.
+                    # Waiting for Telegram would, during an outage, create a second identical record.
                     self._turn_text_sent = True
                 return
 
@@ -772,9 +774,9 @@ class AttachBridge:
         self._flush_files()
 
     def _ensure_outbox(self) -> "DurableOutbox | None":
-        # Jen attach mód. StreamBridge tenhle kód sdílí, ale má vlastní frontu vedle configů
-        # a jiný životní cyklus – přepínat ho beze změny zadání by byla nevyžádaná změna
-        # chování (a jeho test to správně odhalil).
+        # Attach mode only. StreamBridge shares this code but has its own queue alongside the
+        # configs and a different lifecycle — switching it without a spec change would be an
+        # unrequested behaviour change (and its test correctly caught that).
         if not getattr(self, "_use_durable_outbox", False):
             return None
         outbox = getattr(self, "_outbox", None)
@@ -789,21 +791,21 @@ class AttachBridge:
             # destructive finding of the review round, caught just before the switch.
             try:
                 outbox = DurableOutbox(root / "queue")
-            except Exception as e:                     # doručování se nesmí zastavit
+            except Exception as e:                     # delivery must not stop
                 log.error("could not open the durable outbox: %s", e)
                 outbox = None
             self._outbox = outbox
         return outbox
 
     def _flush_pending(self) -> None:
-        """Doručí frontu FIFO a zastaví se na první chybě, aby se zachovalo pořadí.
-        Volá se každý odchozí cyklus, takže se výpadek sítě sám zahojí do ~0,4 s."""
+        """Deliver the queue FIFO, stopping at the first failure to preserve order. Called every
+        outbound cycle, so a network hiccup self-heals within one tick."""
         outbox = self._ensure_outbox()
         while outbox is not None and self._owner_chat is not None:
             rec = outbox.head()
             if rec is None:
                 break
-            # Části už potvrzené Telegramem se NEPOSÍLAJÍ znovu – jen ty zbývající.
+            # Parts already confirmed by Telegram are NOT resent — only the remaining ones.
             for index, chunk in rec.pending_chunks:
                 try:
                     self.tg.send_message(self._owner_chat, chunk)
@@ -823,14 +825,14 @@ class AttachBridge:
                     log.warning("delivery of attachment %s failed (%d/%d): %s",
                                 cesta, pokusu, OUTBOX_MAX_ATTEMPTS, e)
                     if pokusu >= OUTBOX_MAX_ATTEMPTS:
-                        # NESMÍ se použít mark_file_sent: to by do vlastní evidence zapsalo,
-                        # že příloha dorazila, ačkoli nedorazila – tedy tichá ztráta, přesně
-                        # ta, kterou tenhle projekt odstraňuje. Původní podoba téhle opravy
-                        # to dělala; našel to Sol ve třetím kole revize.
-                        # Záznam jde celý do dead-letter: z fronty zmizí (neucpe ji), ale
-                        # zůstane dohledatelný i s tím, které části se doručit stihly.
+                        # mark_file_sent must NOT be used: it would record that the attachment
+                        # arrived when it did not — a silent loss, exactly what this project
+                        # removes. An earlier form of this fix did that; caught in the third
+                        # review round. The whole record goes to dead-letter: it leaves the queue
+                        # (so it does not clog it) but stays traceable, including which parts
+                        # did get delivered.
                         self._ohlas_trvale_odmitnuti(Path(cesta).name, str(e))
-                        outbox.give_up(rec.record_id, f"příloha {cesta}: {e}")
+                        outbox.give_up(rec.record_id, f"attachment {cesta}: {e}")
                         log.error("attachment %s gave up after %d attempts → dead-letter",
                                   cesta, pokusu)
                         vzdano = True
@@ -838,10 +840,10 @@ class AttachBridge:
                     return
                 outbox.mark_file_sent(rec.record_id, cesta)
             if vzdano:
-                continue          # záznam je v dead-letter, fronta jede dál
+                continue          # the record is in dead-letter, the queue moves on
             if rec.key and not self._mark_sent(rec.key):
-                # Ledger se nezapsal → záznam ve frontě ZŮSTÁVÁ. Doručené části jsou
-                # označené, takže se neposílají znovu; příští cyklus jen zkusí dokončit.
+                # The ledger write failed → the record STAYS in the queue. Delivered parts are
+                # marked, so they are not resent; the next cycle just tries to finish it.
                 return
             outbox.done(rec.record_id)
             log.info("FWD (delivered) %d parts, %d attachments",
@@ -897,11 +899,11 @@ class AttachBridge:
         return self._inflight_ids
 
     def _replay_pending_inbound(self) -> int:
-        """Po startu doručí zprávy, které zbyly v trvalém úložišti.
+        """After startup, deliver messages left in durable storage.
 
-        Bez tohohle byla durabilita jen poloviční: zpráva se uložila na disk, ale nikdo
-        ji odtamtud nikdy nevzal – Telegram ji už znovu nepošle, takže by tam ležela až
-        do vypršení retence. Našli Sol i Fable nezávisle při křížové recenzi.
+        Without this, durability was only half done: a message was stored on disk but nobody ever
+        took it from there — Telegram won't resend it, so it would sit until retention expired.
+        Found independently in two cross-reviews.
         """
         inbox = self._ensure_inbox()
         if inbox is None:
@@ -937,10 +939,10 @@ class AttachBridge:
                 log.exception("inbound worker error: %s", e)
                 self._inbound_failed(record_id, str(e))
             else:
-                # `_handle` vrací False, když se zpráva nedostala do session. Dřív se v obou
-                # případech jen zavolalo task_done a zpráva zmizela – to je nález B z auditu.
+                # `_handle` returns False when the message never reached the session. Both cases
+                # used to just call task_done and the message vanished — that is audit finding B.
                 if doruceno is False:
-                    self._inbound_failed(record_id, "nedoručeno do session")
+                    self._inbound_failed(record_id, "not delivered to the session")
                 else:
                     self._inbound_done(record_id)
             finally:
@@ -956,8 +958,8 @@ class AttachBridge:
                 log.warning("cleanup of delivered record %s failed: %s", record_id, e)
 
     def _inbound_failed(self, record_id: str | None, duvod: str) -> None:
-        """Nedoručeno → záznam zůstává a zkusí se znovu. Po vyčerpání pokusů jde do
-        dead-letter, ať zpráva nezmizí bez stopy ani v beznadějném případě."""
+        """Not delivered → the record stays and is retried. After the attempts are exhausted it
+        goes to dead-letter, so the message never vanishes without a trace even in a hopeless case."""
         self._inbound_inflight().discard(record_id)
         inbox = getattr(self, "_inbox", None)
         if not record_id or inbox is None:
@@ -973,7 +975,7 @@ class AttachBridge:
 
     def _inbound_loop(self) -> None:
         self._start_inbound_worker()
-        self._replay_pending_inbound()   # nejdřív dluh z minula, pak nové zprávy
+        self._replay_pending_inbound()   # clear the backlog first, then new messages
         offset = self._load_offset()
         allowed_updates = json.dumps(["message", "edited_message", "message_reaction"])
         transient_fails = 0
@@ -988,10 +990,10 @@ class AttachBridge:
                 )
             except (TelegramError, OSError) as e:
                 if is_network_error(e):
-                    # Přechodný/výpadkový síťový/DNS problém (Errno 8 "nodename nor servname",
-                    # connection reset, timeout) – bridge se sám zotaví. WARNING + backoff;
-                    # ERROR jen JEDNOU při delším výpadku, ať monitoring nealertuje na
-                    # sebe-zotavující se VPN-DNS blip.
+                    # Transient network/DNS problem (Errno 8 "nodename nor servname", connection
+                    # reset, timeout) — the bridge recovers on its own. WARNING + backoff; ERROR
+                    # only ONCE during a longer outage, so monitoring doesn't alert on a
+                    # self-healing VPN/DNS blip.
                     transient_fails += 1
                     if transient_fails >= 10 and not outage_alerted:
                         log.error("getUpdates network outage (%d in a row) is lasting: %s",
@@ -1015,12 +1017,12 @@ class AttachBridge:
                     log.exception("inbound error: %s", e)
 
     def _handle(self, upd: dict) -> bool:
-        """Zpracuje jeden update. Vrací False JEN když se zpráva nedoručila do session.
+        """Handle one update. Returns False ONLY when the message was not delivered to the session.
 
-        Návratová hodnota řídí durable inbox: True = vyřízeno, záznam smí zmizet;
-        False = nedoručeno, záznam zůstává a zkusí se znovu. Proto všechny větve typu
-        „není co dělat" vracejí True – opakovat je nemá smysl. False chodí výhradně
-        ze selhaného zápisu do tmuxu, tedy přesně z toho, co opakování léčí.
+        The return value drives the durable inbox: True = handled, the record may go; False = not
+        delivered, the record stays and is retried. So every "nothing to do" branch returns True —
+        retrying them is pointless. False comes solely from a failed write to tmux, exactly what
+        retrying cures.
         """
         # Reactions (e.g. ❤️) → quick-feedback line.
         mr = upd.get("message_reaction")
@@ -1057,8 +1059,8 @@ class AttachBridge:
 
         text = (msg.get("text") or msg.get("caption") or "").strip()
         if msg.get("voice") or msg.get("audio"):
-            # Přepis i stahování si řeší vlastní opakování a uživateli samy hlásí chybu,
-            # takže se sem nevracíme – opakování zvenčí by jen znovu platilo za přepis.
+            # Transcription and download do their own retries and report errors to the user
+            # themselves, so we don't loop here — an external retry would just pay for STT again.
             text = self._transcribe(msg.get("voice") or msg.get("audio"), chat_id) or text
             if not text:
                 return True
@@ -1120,10 +1122,10 @@ class AttachBridge:
         if chat_id is None:
             return
         ted = time.monotonic()
-        # POZOR na výchozí hodnotu: `time.monotonic()` počítá od startu SYSTÉMU, takže na
-        # macOS s dlouhým během je to velké číslo, ale na čerstvě nastartovaném Linuxu
-        # (kontejner, restart serveru) skoro nula. S výchozí 0.0 by tam prvních 30 sekund
-        # žádné potvrzení neodešlo. Proto None = "ještě nikdy", ne nula.
+        # MIND the default: `time.monotonic()` counts from SYSTEM start, so on a long-running
+        # macOS it is a large number, but on a freshly booted Linux (container, server restart)
+        # nearly zero. With a 0.0 default no ACK would be sent for the first 30 seconds there.
+        # So None = "never yet", not zero.
         posledni = getattr(self, "_last_queue_ack", None)
         if posledni is not None and ted - posledni < QUEUE_ACK_COOLDOWN:
             return
@@ -1131,8 +1133,8 @@ class AttachBridge:
         try:
             self.tg.send_message(chat_id, "⚡ Got your message. I'll get to it as soon as "
                                           "I finish what I'm on.")
-            # Logovat MUSÍ: bez záznamu nejde po incidentu zjistit, jestli potvrzení odešlo.
-            # 31. 7. jsem kvůli tomu nedokázala rozhodnout, jestli feature funguje.
+            # Must log: without a record you can't tell after an incident whether the ACK went
+            # out. It was once impossible to decide whether the feature even worked.
             log.info("receipt ACK sent (another turn is running)")
         except Exception as e:
             log.warning("could not send the receipt ACK: %s", e)
@@ -1164,7 +1166,7 @@ class AttachBridge:
         log.info("TURN START t=%.2f", time.time())
 
     def _inject(self, text: str) -> bool:
-        """Doručí zprávu do session. Selhání NIKDY nesmí být tiché.
+        """Deliver a message to the session. A failure must NEVER be silent.
 
         Previously a failed write to tmux was only logged and the message vanished — the user
         learned nothing. Seen in production:
@@ -1186,7 +1188,7 @@ class AttachBridge:
             except SessionError as e:
                 posledni_chyba = e
                 if "refusing to inject" in str(e):
-                    # Pane neběží očekávaný agent – opakování nepomůže, jen by zdrželo.
+                    # The pane isn't running the expected agent — retrying won't help, only delay.
                     log.error("inject failed: %s", e)
                     self._turn_active.clear()
                     self._notify_unsafe_pane(str(e))
@@ -1201,7 +1203,7 @@ class AttachBridge:
         return False
 
     def _notify_inject_failed(self, text: str, reason: str) -> None:
-        """Řekne majiteli, že jeho zpráva nedošla – radši dvakrát než nikdy."""
+        """Tell the owner their message did not get through — better twice than never."""
         if not self._owner_chat:
             return
         nahled = text.strip().replace("\n", " ")
@@ -1586,16 +1588,16 @@ class AttachBridge:
                 elif self._turn_end is not None and self._turn_end.exists():
                     self._end_turn()
                 elif self._turn_active.is_set() and time.monotonic() - self._last_activity > IDLE_DONE:
-                    # Dřív tahle větev turn jen zavřela: backstop se nespustil, takže odpověď
-                    # se neodeslala a nezůstal po ní ani řádek v logu. Byla to jedna ze tří
-                    # cest, kterými zprávy mizely beze stopy (audit 2026-07-31, nález C).
-                    # Konec turnu teď prochází jednou společnou cestou bez ohledu na to, čím
-                    # byl vyvolán; warning odlišuje "skončilo tichem" od "ohlásil to hook".
+                    # This branch used to just close the turn: the backstop didn't run, so the
+                    # reply wasn't sent and not even a log line was left. It was one of three ways
+                    # messages vanished without a trace (audit finding C). Turn end now goes
+                    # through one shared path regardless of what triggered it; the warning
+                    # distinguishes "ended in silence" from "the hook reported it".
                     log.warning("konec turnu podle ticha (%.0f s bez aktivity), hook se neozval",
                                 IDLE_DONE)
                     self._end_turn()
-                # Živý retry: zprávy, které se nepodařilo doručit, se zkoušejí i za běhu.
-                # Replay jen při startu znamenal u dlouho běžící služby čekání donekonečna.
+                # Live retry: messages that failed to deliver are retried while running too.
+                # Replay only at startup meant, for a long-running service, waiting forever.
                 if time.monotonic() - getattr(self, "_last_inbound_retry", 0.0) > INBOUND_RETRY_INTERVAL:
                     self._last_inbound_retry = time.monotonic()
                     self._replay_pending_inbound()
@@ -1763,11 +1765,11 @@ class AttachBridge:
                 self._send_final(f"⚠️ Couldn't send {resolved.name}: {e}", turn_text=False)
 
     def _send_one_file(self, raw: str) -> None:
-        """Pošle jednu přílohu z durable outboxu.
+        """Send one attachment from the durable outbox.
 
-        Rozlišuje dva druhy selhání, protože se s nimi nakládá opačně:
-        cesta mimo povolené složky je TRVALÉ odmítnutí – ohlásí se a bere se za vyřízené,
-        jinak by ucpalo frontu navěky. Chyba při odeslání je PŘECHODNÁ a propustí se ven,
+        Distinguishes two kinds of failure because they are handled oppositely:
+        a path outside the allowed folders is a PERMANENT rejection — reported and treated as
+        done, else it would clog the queue forever. A send error is TRANSIENT and is let out,
         aby ji outbox zkusil znovu.
         """
         resolved, reason = self._safe_outbox_path(raw)
@@ -1777,16 +1779,17 @@ class AttachBridge:
         try:
             self.tg.send_file(self._owner_chat, resolved)
         except OSError as e:
-            # Soubor zmizel nebo se nedá přečíst – opakováním se to nespraví.
+            # The file vanished or can't be read — retrying won't fix it.
             self._ohlas_trvale_odmitnuti(resolved.name, str(e))
-        # Ostatní chyby (včetně TelegramError) propouštíme ven jako přechodné. Rozlišovat je
-        # binárně se ukázalo jako past: nejasnou chybu bych buď zahodila (ztráta zprávy), nebo
-        # opakovala donekonečna (ucpaná FIFO fronta blokující všechny další odpovědi – Fable F2).
-        # Místo hádání se opakuje OMEZENĚ a pak se to vzdá; počitadlo drží outbox.
+        # Other errors (including TelegramError) are let out as transient. Classifying them
+        # binarily proved a trap: an unclear error would either be dropped (message loss) or
+        # retried forever (a clogged FIFO queue blocking every later reply — finding F2).
+        # Instead of guessing, it is retried a BOUNDED number of times and then given up; the
+        # outbox keeps the counter.
 
     def _ohlas_trvale_odmitnuti(self, jmeno: str, duvod: str) -> None:
-        """Přílohu, kterou nemá smysl zkoušet znovu, ohlásí a bere za vyřízenou.
-        Tiché zahození by bylo horší než viditelná chyba – a ucpaná fronta ještě horší."""
+        """Report an attachment not worth retrying and treat it as done. A silent drop would be
+        worse than a visible error — and a clogged queue worse still."""
         log.warning("refusing to send attachment %s: %s", jmeno, duvod)
         try:
             self.tg.send_message(self._owner_chat, f"⚠️ Couldn't send {jmeno}: {duvod}")
@@ -1894,8 +1897,8 @@ class AttachBridge:
             log.error("transcription failed: %s", e)
             # This is an inbound voice-note failure, not agent output for the current turn.
             self._send_final(
-                f"🎤 Přepis hlasovky se nepovedl ({e}). "
-                "Pošli prosím znovu nebo napiš textem.",
+                f"🎤 Voice transcription failed ({e}). "
+                "Please resend it or type your message instead.",
                 turn_text=False,
             )
             return None

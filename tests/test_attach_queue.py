@@ -195,7 +195,7 @@ class AttachInboundTests(unittest.TestCase):
         self.assertEqual(b._session.injected, [])
         self.assertEqual(len(b.tg.sent), 1)
         self.assertEqual(b.tg.sent[0][0], 7)
-        self.assertIn("Přepis hlasovky se nepovedl", b.tg.sent[0][1])
+        self.assertIn("Voice transcription failed", b.tg.sent[0][1])
         self.assertIn("timed out", b.tg.sent[0][1])
         self.assertFalse(b._turn_text_sent)
 
