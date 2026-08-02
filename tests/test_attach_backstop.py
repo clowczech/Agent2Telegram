@@ -148,9 +148,9 @@ class AttachBackstopTests(unittest.TestCase):
 
 
 class ReactionTurnBackstopTests(unittest.TestCase):
-    """A reaction says "no reply needed"; the backstop says "always reply". Before the fix the
-    backstop won and forwarded the agent's internal note ("No response requested.") to the user.
-    Every test here goes through the real _handle() path, not by setting the flag by hand."""
+    """A heart always deserves a short answer, and it must never be answered with the agent's
+    INTERNAL text. The prompt asks for a one-liner; the backstop exemption is the safety net for
+    when the agent stays silent anyway. Every test goes through the real _handle() path."""
 
     def setUp(self):
         self._retry_delay = attach_mod.BACKSTOP_RETRY_DELAY
@@ -189,6 +189,25 @@ class ReactionTurnBackstopTests(unittest.TestCase):
 
             self.assertEqual(b.tg.sent, [(7, "thanks!")],
                              "an explicit reply to a reaction must still go out, exactly once")
+
+    def test_reaction_prompt_asks_for_a_short_answer(self):
+        """Petr 2026-08-02: a heart must ALWAYS get a reply, just a very short one."""
+        with tempfile.TemporaryDirectory() as d:
+            b = _bridge(d)
+            b._turn_active.clear()
+            b._turn_from_tg = False
+            b._last_assistant_text = lambda: ""
+            b._drain_transcript = lambda: None
+
+            b._handle(_reaction())
+
+            vyzva = b._session.injected[0].lower()
+            self.assertIn("always answer", vyzva,
+                          "the reaction prompt no longer asks for a reply at all")
+            self.assertIn("short", vyzva,
+                          "the reaction prompt does not ask for a SHORT reply")
+            self.assertNotIn("no need to reply", vyzva)
+
 
     def test_reaction_during_a_running_turn_keeps_the_backstop_armed(self):
         """A heart landing mid-answer must not disarm the backstop for the real question."""
