@@ -643,6 +643,20 @@ class AttachBridge:
         # at a time, so a second message only gets its turn after the first finishes — the ACK
         # would arrive late and useless. Confirmed live: in the original form it never arrived.
         self._maybe_ack_queued(upd)
+        # Log EVERY accepted incoming message. Without this, "I wrote and nothing happened"
+        # cannot be answered from the log: there was no record that the message ever arrived
+        # (gap found 2026-08-02). Content is truncated and never includes attachments' bytes.
+        msg = upd.get("message") or upd.get("edited_message") or {}
+        if msg.get("voice") or msg.get("audio"):
+            druh = "voice"
+        elif msg.get("photo") or msg.get("document"):
+            druh = "file"
+        elif upd.get("message_reaction"):
+            druh = "reaction"
+        else:
+            druh = "text"
+        nahled = (msg.get("text") or msg.get("caption") or "").replace("\n", " ")[:40]
+        log.info("IN  id=%s update=%s kind=%s %r", record_id, update_id, druh, nahled)
         self._submit_inbound_update(upd, record_id)
         self._mark_update_processed(update_id)
         return next_offset
@@ -926,6 +940,8 @@ class AttachBridge:
             else:
                 # `_handle` returns False when the message never reached the session. Both cases
                 # used to just call task_done and the message vanished — that is audit finding B.
+                if doruceno is not False:
+                    log.info("IN  delivered to session id=%s", record_id)
                 if doruceno is False:
                     self._inbound_failed(record_id, "not delivered to the session")
                 else:
