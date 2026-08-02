@@ -24,6 +24,13 @@ class _FakeClient:
     def send_chat_action(self, chat_id, action):
         pass
 
+    def send_plain_id(self, chat_id, text, parse_mode=None):
+        self.sent.append((chat_id, text))
+        return 55
+
+    def edit_plain(self, chat_id, message_id, text, parse_mode=None):
+        pass
+
 
 class _FakeSession:
     """Records what got injected into the pane; injection always succeeds."""
@@ -221,6 +228,31 @@ class ReactionTurnBackstopTests(unittest.TestCase):
 
             self.assertEqual(b.tg.sent, [(7, "the real answer")],
                              "a reaction mid-turn swallowed the answer to the real question")
+
+
+
+class StatusBubbleLifetimeTests(unittest.TestCase):
+    """A technical bubble is deleted at turn end. One created with NO turn running has nothing
+    to delete it and hangs in the chat — Petr saw "Editing MEMORY.md" stuck for eight minutes
+    after a bridge restart drained the transcript outside a turn (2026-08-02)."""
+
+    def test_no_bubble_is_created_outside_a_turn(self):
+        with tempfile.TemporaryDirectory() as d:
+            b = _bridge(d)
+            b._turn_active.clear()
+
+            b._status_push("\u270f\ufe0f Editing MEMORY.md")
+
+            self.assertIsNone(b._status["mid"],
+                              "a bubble was created with no turn running — nothing will delete it")
+
+    def test_bubble_is_still_created_during_a_turn(self):
+        with tempfile.TemporaryDirectory() as d:
+            b = _bridge(d)                      # _turn_active is set
+            b._status_push("\U0001f4c4 Read foo.py")
+
+            self.assertEqual(b._status["mid"], 55, "the live progress bubble stopped working")
+            self.assertTrue(b.tg.sent)
 
 
 if __name__ == "__main__":
