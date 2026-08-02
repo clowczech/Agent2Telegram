@@ -1634,6 +1634,12 @@ class AttachBridge:
         # arrives (then re-created below it) and at turn end — so it always trails at the bottom.
         if self._owner_chat is None or not line or line == self._status["shown"]:
             return
+        # No live turn → no bubble. The bubble is technical progress and is deleted at turn end;
+        # one created outside a turn has nothing to delete it and hangs in the chat until the NEXT
+        # turn happens to finish. Petr saw exactly that: "Editing MEMORY.md" stuck for eight
+        # minutes after a bridge restart drained the transcript with no turn running (2026-08-02).
+        if not self._turn_active.is_set():
+            return
         body = f"<i>{html.escape(line)}</i>"
         if self._status["mid"] is None:
             mid = self.tg.send_plain_id(self._owner_chat, body, parse_mode="HTML")
