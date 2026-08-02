@@ -150,3 +150,31 @@ si položit otázku, od čeho se vlastně počítá – `monotonic()` není tot�
 měsíc a na čerstvě spuštěném kontejneru.
 
 Tohle je přesně ten druh chyby, kvůli kterému Petr chtěl, aby bridge fungoval i na cizím Ubuntu.
+
+---
+
+## 2026-08-02 · Reakce srdíčkem poslala uživateli interní poznámku agenta
+
+**Co se stalo:** Petr dal na zprávu ❤ a přišla mu odpověď „No response requested." – tedy
+interní poznámka agenta, ne zpráva pro něj. Nahlásila to Lana‑Genius ze stable v1, Petr to
+vzápětí potvrdil z vlastní strany.
+
+**Mechanika:** reakční větev `_handle` injectne „…no need to reply unless relevant." a přitom
+zavolá `_begin_turn()`, čímž turn označí jako Telegram‑originated. Když agent správně mlčí,
+sáhne turn‑end backstop pro poslední assistant text a pošle ho. Dvě pravidla si přímo odporovala:
+reakce říká „nemusíš odpovídat", backstop říká „Telegram turn nesmí zůstat bez odpovědi".
+
+**Proč to prošlo:** backstop vznikl proti ztraceným odpovědím a testoval se na běžných
+zprávách. Reakce je jediný vstup, který odpověď **nečeká** – a na ten se nikdo nepodíval.
+
+**Škoda:** žádná věcná, jen zmatek. Ale je to únik interního textu k uživateli, tedy přesně
+ta třída chyby, která by u cizího uživatele na webináři vypadala zle.
+
+**Co to příště chytne:** u každého nového vstupního kanálu si položit otázku „očekává tenhle
+vstup odpověď?" a podle toho zkontrolovat backstop. V testech teď existuje třída
+`ReactionTurnBackstopTests`, která jde přes reálné `_handle()`.
+
+**Past, které jsem se vyhnula:** původní návrh opravy nastavoval `_turn_text_sent = True`.
+To pole ale zároveň řídí TUI bubliny a hlavně – reakce, která dorazí **během** běžícího turnu,
+by tím odzbrojila backstop pro skutečnou otázku pod ní. Proto vlastní příznak a podmínka
+„jen když žádný turn neběžel".
