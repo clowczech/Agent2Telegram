@@ -656,7 +656,15 @@ class AttachBridge:
         else:
             druh = "text"
         nahled = (msg.get("text") or msg.get("caption") or "").replace("\n", " ")[:40]
-        log.info("IN  id=%s update=%s kind=%s %r", record_id, update_id, druh, nahled)
+        # Whether it was a reply to a specific message matters for later diagnosis: the agent
+        # gets that context, so the log must show it too (otherwise the two cannot be matched up).
+        odpoved = msg.get("reply_to_message") or {}
+        na_co = (odpoved.get("text") or odpoved.get("caption") or "").replace("\n", " ")[:30]
+        if na_co:
+            log.info("IN  id=%s update=%s kind=%s reply_to=%r %r",
+                     record_id, update_id, druh, na_co, nahled)
+        else:
+            log.info("IN  id=%s update=%s kind=%s %r", record_id, update_id, druh, nahled)
         self._submit_inbound_update(upd, record_id)
         self._mark_update_processed(update_id)
         return next_offset
