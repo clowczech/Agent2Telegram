@@ -125,6 +125,7 @@ def _bridge(state_dir, client=None, session=None):
     b._offset_file = state / "offset"
     b._processed_updates_file = state / "processed_updates"
     b._queue_path = state / "outbox.json"
+    b._sent_path = state / "sent_uuids"        # dedup ledger (used by _mark_sent)
     b._processed_update_ids, b._processed_update_order = b._read_processed_updates()
     return b
 
@@ -935,3 +936,44 @@ class VoiceTranscriptMarkerTests(unittest.TestCase):
             b = _bridge(td)
             b._handle(_msg(8002, "tohle jsem napsal"))
             self.assertNotIn("voice transcript", "\n".join(b._session.injected))
+
+
+class BackstopDuplicateTests(unittest.TestCase):
+    """The backstop must not resend a reply the normal path already delivered.
+
+    Proven from the production log on 2026-08-02: the user received one reply twice, with two
+    different queue ids (433fa145 / 52df94c3) but the same text, in the same second. The
+    backstop called _send_final without a dedup key, so the queue treated it as a new message.
+    The fix that prevented a lost reply had started producing duplicates instead.
+    """
+
+    def test_backstop_does_not_resend_what_was_already_sent(self):
+        with tempfile.TemporaryDirectory() as td:
+            b = _bridge(td)
+            b._turn_active.set()
+            b._turn_from_tg = True
+            b._turn_text_sent = False
+            b._last_backstop_key = "uuid-abc"
+
+            # normal path delivered it first, under its own dedup key
+            b._send_final("finální odpověď", key="uuid-abc")
+            b._flush_pending()
+            prvni = list(b.tg.sent)
+            self.assertEqual(len(prvni), 1, "první doručení se nepovedlo – špatný test")
+
+            # now the backstop fires with the same message
+            b._send_final("finální odpověď", key="uuid-abc")
+            b._flush_pending()
+
+            self.assertEqual(b.tg.sent, prvni,
+                             "pojistka odeslala zprávu podruhé – uživatel ji dostane dvakrát")
+
+    def test_backstop_still_sends_when_nothing_went_out(self):
+        """The guard must not break the case it exists for: a turn with no reply at all."""
+        with tempfile.TemporaryDirectory() as td:
+            b = _bridge(td)
+            b._turn_text_sent = False
+            b._last_backstop_key = "uuid-xyz"
+            b._send_final("jediná odpověď", key="uuid-xyz")
+            b._flush_pending()
+            self.assertEqual(len(b.tg.sent), 1, "pojistka neposlala odpověď, která nikdy neodešla")

@@ -464,6 +464,7 @@ class AttachBridge:
         pos = start
         last_user_end = None
         from_tg = self._turn_from_tg
+        last_key = ""
         for raw in tail.split(b"\n"):
             line_end = pos + len(raw) + 1       # +1 for the newline separator
             pos = line_end
@@ -1447,8 +1448,10 @@ class AttachBridge:
                 for ev in self._reader.parse(rec):
                     if ev.kind == "text" and ev.text and ev.text.strip():
                         last = ev.text
+                        last_key = ev.key            # dedup id of that very message
             except Exception:
                 continue
+        self._last_backstop_key = last_key
         return last
 
     def _wait_backstop_retry(self) -> None:
@@ -1515,7 +1518,11 @@ class AttachBridge:
                     answer = self._consume_signal_text()
                     out = self._strip_marker(answer) if answer else ""
             if out and not self._turn_text_sent:
-                self._send_final(out)
+                # Send WITH the message's dedup key. Without it the backstop and the normal
+                # transcript path both queue the same text under different ids and the user
+                # gets it twice — proven from the log on 2026-08-02 (ids 433fa145 / 52df94c3,
+                # same text, same second). The key makes the queue recognise the duplicate.
+                self._send_final(out, key=getattr(self, "_last_backstop_key", "") or None)
                 log.info("TURN END backstop → forwarded final answer from %s %r",
                          source, out[:30])
             elif not self._turn_text_sent:
