@@ -1005,3 +1005,37 @@ class BackstopDuplicateTests(unittest.TestCase):
             b._send_final("jediná odpověď", key="uuid-xyz")
             b._flush_pending()
             self.assertEqual(len(b.tg.sent), 1, "pojistka neposlala odpověď, která nikdy neodešla")
+
+
+class StaleTurnEndTests(unittest.TestCase):
+    """A leftover end-of-turn signal must not end the NEXT turn.
+
+    Sol, 2026-08-02: a voice note got no answer at all. The log showed the turn starting and
+    ending 1.5 s later with nothing sent and no backstop. Codex writes task_complete to its
+    rollout with a delay, so a late one from the previous turn landed inside the new one and
+    closed it immediately.
+    """
+
+    def test_begin_turn_clears_a_stale_end_signal(self):
+        with tempfile.TemporaryDirectory() as td:
+            b = _bridge(td)
+            b._pending_turn_end = True          # leftover from the previous turn
+            b._status = {"mid": None, "shown": ""}
+            b._session = _OkSession()
+            b._tui_seen = set()
+
+            b._begin_turn()
+
+            self.assertFalse(b._pending_turn_end,
+                             "stale end-of-turn signal survived into the new turn — "
+                             "the reply would never be sent")
+
+    def test_begin_turn_records_when_it_started(self):
+        """Needed to spot a turn that ends suspiciously fast."""
+        with tempfile.TemporaryDirectory() as td:
+            b = _bridge(td)
+            b._status = {"mid": None, "shown": ""}
+            b._session = _OkSession()
+            b._tui_seen = set()
+            b._begin_turn()
+            self.assertGreater(getattr(b, "_turn_begun_at", 0), 0)

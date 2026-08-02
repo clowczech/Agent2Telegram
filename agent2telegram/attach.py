@@ -57,6 +57,8 @@ OUTBOX_MAX_ATTEMPTS = 3
 # How often a message left in durable storage is retried WHILE RUNNING. Without this it waited
 # for a restart — for a service running for weeks, effectively forever (review finding #1).
 INBOUND_RETRY_INTERVAL = 30.0
+#: A turn finishing faster than this is almost certainly a stale end-of-turn signal, not real work.
+SUSPICIOUS_TURN_SECONDS = 3.0
 # How often the outbound loop checks whether there is anything to send. Was 0.4 s; shortened to
 # 0.15 s, because over long work with dozens of progress messages it added up to a noticeable
 # delay. The cost is reading the queue more often — so it was measured, not guessed.
@@ -1161,6 +1163,12 @@ class AttachBridge:
         self._max_gap = 0.0
         self._last_typing = now
         self._turn_text_sent = False             # gate TUI bubbles until intro text lands
+        # Clear any end-of-turn signal left over from the PREVIOUS turn. Codex writes
+        # task_complete to the rollout with a delay, so a late one could land after the next
+        # turn had already started and end it within ~1 s — the reply was then never sent and
+        # the backstop never fired (Sol, 2026-08-02: voice note answered with silence).
+        self._pending_turn_end = False
+        self._turn_begun_at = now
         # Seed the TUI dedup with tool lines ALREADY on screen from previous turns, so the
         # scraper only emits calls that appear DURING this turn — otherwise stale lines still
         # visible in the pane get re-sent as bubbles under the new turn.
@@ -1559,6 +1567,11 @@ class AttachBridge:
                 #     if turn_active is unset (e.g. a restart mid-turn that would orphan a bubble).
                 #   * Fallback: force-end if the transcript went quiet too long (hook missing).
                 if self._pending_turn_end:
+                    zacatek = getattr(self, "_turn_begun_at", 0.0)
+                    if zacatek and time.monotonic() - zacatek < SUSPICIOUS_TURN_SECONDS:
+                        log.warning("turn ending after %.1fs — suspiciously fast, a stale "
+                                    "end-of-turn signal is the usual cause",
+                                    time.monotonic() - zacatek)
                     self._finish_turn()
                 elif self._turn_end is not None and self._turn_end.exists():
                     self._end_turn()
