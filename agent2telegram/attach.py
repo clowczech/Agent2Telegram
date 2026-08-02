@@ -1460,6 +1460,7 @@ class AttachBridge:
         except OSError:
             return None
         last = None
+        last_key = None                              # transcript with no assistant text at all
         for raw in tail.split(b"\n"):
             line = raw.strip()
             if not line:
