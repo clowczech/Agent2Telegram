@@ -924,6 +924,7 @@ class AttachBridge:
         except OSError:
             return None
         last = None
+        last_key = None
         for raw in tail.split(b"\n"):
             line = raw.strip()
             if not line:
@@ -936,8 +937,10 @@ class AttachBridge:
                 for ev in self._reader.parse(rec):
                     if ev.kind == "text" and ev.text and ev.text.strip():
                         last = ev.text
+                        last_key = ev.key            # dedup id of that very message
             except Exception:
                 continue
+        self._last_backstop_key = last_key
         return last
 
     def _wait_backstop_retry(self) -> None:
@@ -1005,7 +1008,11 @@ class AttachBridge:
                     answer = self._consume_signal_text()
                     out = self._strip_marker(answer) if answer else ""
             if out and not self._turn_text_sent:
-                self._send_final(out)
+                # Send WITH the message's dedup key. Without it the backstop re-sends a message
+                # the normal path already delivered — typically the PREVIOUS turn's answer, when
+                # the turn ends before the new one reaches the transcript. Petr got exactly that
+                # duplicate on the Genius bridge (2026-08-02, 15:51 answer repeated at 16:04).
+                self._send_final(out, key=getattr(self, "_last_backstop_key", "") or None)
                 log.info("TURN END backstop → forwarded final answer from %s %r",
                          source, out[:30])
             elif not self._turn_text_sent:

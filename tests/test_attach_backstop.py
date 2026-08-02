@@ -77,6 +77,7 @@ def _bridge(tmpdir):
     b._tui_seen = set()
     b._turn_is_reaction = False
     b._pending_files = []
+    b._sent_path = Path(tmpdir) / "sent_uuids"
     return b
 
 
@@ -253,6 +254,58 @@ class StatusBubbleLifetimeTests(unittest.TestCase):
 
             self.assertEqual(b._status["mid"], 55, "the live progress bubble stopped working")
             self.assertTrue(b.tg.sent)
+
+
+
+class BackstopDedupTests(unittest.TestCase):
+    """The backstop must never re-send a message the normal path already delivered. It reads the
+    LAST assistant text in the transcript, which — when a turn ends before its own answer lands —
+    is the PREVIOUS turn's answer. Petr got that duplicate on the Genius bridge (2026-08-02:
+    the 15:51 reply arrived again at 16:04, right after a voice note)."""
+
+    def setUp(self):
+        self._retry_delay = attach_mod.BACKSTOP_RETRY_DELAY
+        attach_mod.BACKSTOP_RETRY_DELAY = 0.0
+
+    def tearDown(self):
+        attach_mod.BACKSTOP_RETRY_DELAY = self._retry_delay
+
+    def test_already_delivered_message_is_not_sent_again(self):
+        with tempfile.TemporaryDirectory() as d:
+            b = _bridge(d)
+            b._sent_keys.add("msg-1")                    # the normal path delivered it earlier
+            b._last_assistant_text = lambda: "[tg] the previous answer"
+            b._drain_transcript = lambda: None
+            b._last_backstop_key = "msg-1"
+
+            b._finish_turn()
+
+            self.assertEqual(b.tg.sent, [],
+                             "the backstop re-sent a message that had already been delivered")
+
+    def test_a_genuinely_new_answer_still_goes_out(self):
+        with tempfile.TemporaryDirectory() as d:
+            b = _bridge(d)
+            b._sent_keys.add("msg-1")
+            b._last_assistant_text = lambda: "[tg] a brand new answer"
+            b._drain_transcript = lambda: None
+            b._last_backstop_key = "msg-2"
+
+            b._finish_turn()
+
+            self.assertEqual(b.tg.sent, [(7, "a brand new answer")],
+                             "the backstop stopped delivering genuinely new answers")
+
+    def test_backstop_key_comes_from_the_transcript_scan(self):
+        """The key must be filled by _last_assistant_text itself, not by the caller."""
+        with tempfile.TemporaryDirectory() as d:
+            b = _bridge(d)
+            b._transcript.write_text("", "utf-8")
+
+            b._last_assistant_text()                     # no assistant text anywhere
+
+            self.assertIsNone(b._last_backstop_key,
+                              "an empty transcript must leave the key empty, never crash")
 
 
 if __name__ == "__main__":
