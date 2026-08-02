@@ -139,7 +139,10 @@ class StreamBridge(AttachBridge):
         threading.Thread(target=self._run_turn, args=(text,), daemon=True).start()
 
     def _codex_argv(self, prompt: str) -> list:
-        base = ["codex", "exec", "--json"]
+        # --skip-git-repo-check is REQUIRED: without it Codex refuses to run outside a git
+        # repository ("Not inside a trusted directory"), which is the normal case for a bridge
+        # working directory. Verified 2026-08-02: the turn ended in 0.4 s with no reply.
+        base = ["codex", "exec", "--json", "--skip-git-repo-check"]
         if self.cfg.command:                        # user override (without {prompt})
             base = [a for a in self.cfg.command if a != "{prompt}"]
         if base and base[0] == "codex":             # spawn by absolute path (PATH-independent)
