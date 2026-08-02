@@ -947,6 +947,34 @@ class BackstopDuplicateTests(unittest.TestCase):
     The fix that prevented a lost reply had started producing duplicates instead.
     """
 
+    def test_finish_turn_passes_the_dedup_key(self):
+        """Goes through _finish_turn (the production path), not _send_final directly.
+
+        The first version of this test called _send_final itself, so removing the key from the
+        backstop did not make it fail — it proved nothing. Third time this trap appeared today.
+        """
+        with tempfile.TemporaryDirectory() as td:
+            b = _bridge(td)
+            b._turn_active.set()
+            b._turn_from_tg = True
+            b._turn_text_sent = False
+            b._transcript = Path(td) / "transcript.jsonl"
+            b._transcript.write_text("")
+            b._last_backstop_key = "uuid-from-transcript"
+            zachyceno = {}
+
+            b._retry_last_assistant_text = lambda: "finální odpověď"
+            b._has_turn_end_backstop_source = lambda: True
+            b._send_final = lambda text, key=None, **kw: zachyceno.update(text=text, key=key)
+            b._status_clear = lambda *a, **k: None
+            b._consume_turn_end = lambda *a, **k: None
+
+            b._finish_turn()
+
+            self.assertEqual(zachyceno.get("text"), "finální odpověď", "pojistka nic neposlala")
+            self.assertEqual(zachyceno.get("key"), "uuid-from-transcript",
+                             "pojistka poslala BEZ dedup klíče – fronta duplicitu nepozná")
+
     def test_backstop_does_not_resend_what_was_already_sent(self):
         with tempfile.TemporaryDirectory() as td:
             b = _bridge(td)
