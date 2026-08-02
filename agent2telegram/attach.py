@@ -1045,11 +1045,14 @@ class AttachBridge:
             emojis = "".join(r.get("emoji", "") for r in mr.get("new_reaction", [])
                              if r.get("type") == "emoji")
             if emojis:
-                # A reaction says "no need to reply". The turn-end backstop says "a Telegram turn
-                # must never go unanswered". Those two contradict, and the backstop wins: it
-                # forwarded the agent's INTERNAL note ("No response requested.") to the user
-                # (Genius bridge, 2026-08-02). So a turn opened purely by a reaction is exempt
-                # from the backstop; an explicit [tg] reply still goes out the normal way.
+                # A reaction DOES deserve an answer, but a one-liner — being left on read feels
+                # like the bridge swallowed it. The prompt therefore asks for a very short reply.
+                #
+                # The backstop exemption below is the safety net for when the agent still stays
+                # silent. Without it the backstop ("a Telegram turn must never go unanswered")
+                # grabs the last assistant text and can forward an INTERNAL note — that is how
+                # "No response requested." reached the user (Genius bridge, 2026-08-02). Silence
+                # is the lesser evil; the log line in _finish_turn keeps it visible.
                 # Only when no turn was running: a reaction landing mid-turn must not disarm the
                 # backstop for the real question underneath it.
                 bezi_turn = self._turn_active.is_set()
@@ -1058,7 +1061,8 @@ class AttachBridge:
                     self._turn_is_reaction = True
                 return self._inject(
                     f"{emojis} reacted {emojis} to your message #{mr.get('message_id')} "
-                    f"— quick feedback; no need to reply unless relevant.")
+                    f"— quick feedback. Always answer, but with ONE very short line "
+                    f"(a few words or an emoji), nothing more.")
             return True
 
         msg = upd.get("message") or upd.get("edited_message")
