@@ -21,6 +21,24 @@ class _FakeClient:
     def delete_message(self, chat_id, message_id):
         self.deleted.append((chat_id, message_id))
 
+    def send_chat_action(self, chat_id, action):
+        pass
+
+
+class _FakeSession:
+    """Records what got injected into the pane; injection always succeeds."""
+
+    def __init__(self):
+        self.injected = []
+
+    def inject(self, text):
+        self.injected.append(text)
+
+
+def _reaction(message_id=42, emoji="❤"):
+    return {"message_reaction": {"user": {"id": 7}, "message_id": message_id,
+                                 "new_reaction": [{"type": "emoji", "emoji": emoji}]}}
+
 
 def _bridge(tmpdir):
     b = object.__new__(AttachBridge)
@@ -46,6 +64,12 @@ def _bridge(tmpdir):
     b._sent_keys = set()
     b._pending_send = []
     b._queue_path = None
+    b._allowed = {7}
+    b._session = _FakeSession()
+    b._last_activity = 0.0
+    b._tui_seen = set()
+    b._turn_is_reaction = False
+    b._pending_files = []
     return b
 
 
@@ -121,6 +145,63 @@ class AttachBackstopTests(unittest.TestCase):
 
             self.assertEqual(b.tg.sent, [(7, "already sent")])
             self.assertFalse(b._turn_active.is_set())
+
+
+class ReactionTurnBackstopTests(unittest.TestCase):
+    """A reaction says "no reply needed"; the backstop says "always reply". Before the fix the
+    backstop won and forwarded the agent's internal note ("No response requested.") to the user.
+    Every test here goes through the real _handle() path, not by setting the flag by hand."""
+
+    def setUp(self):
+        self._retry_delay = attach_mod.BACKSTOP_RETRY_DELAY
+        attach_mod.BACKSTOP_RETRY_DELAY = 0.0
+
+    def tearDown(self):
+        attach_mod.BACKSTOP_RETRY_DELAY = self._retry_delay
+
+    def test_reaction_without_a_reply_forwards_nothing(self):
+        with tempfile.TemporaryDirectory() as d:
+            b = _bridge(d)
+            b._turn_active.clear()                  # nothing running when the reaction lands
+            b._turn_from_tg = False
+            b._last_assistant_text = lambda: "No response requested."
+            b._drain_transcript = lambda: None
+
+            b._handle(_reaction())
+            self.assertTrue(b._session.injected, "the reaction never reached the session")
+            b._finish_turn()
+
+            self.assertEqual(b.tg.sent, [],
+                             "the agent's internal note leaked to the user after a reaction")
+            self.assertFalse(b._turn_active.is_set())
+
+    def test_reaction_turn_still_delivers_an_explicit_reply(self):
+        with tempfile.TemporaryDirectory() as d:
+            b = _bridge(d)
+            b._turn_active.clear()
+            b._turn_from_tg = False
+            b._last_assistant_text = lambda: "No response requested."
+            b._drain_transcript = lambda: None
+
+            b._handle(_reaction())
+            b._send_final("thanks!")                # the agent decided to answer anyway
+            b._finish_turn()
+
+            self.assertEqual(b.tg.sent, [(7, "thanks!")],
+                             "an explicit reply to a reaction must still go out, exactly once")
+
+    def test_reaction_during_a_running_turn_keeps_the_backstop_armed(self):
+        """A heart landing mid-answer must not disarm the backstop for the real question."""
+        with tempfile.TemporaryDirectory() as d:
+            b = _bridge(d)                          # _turn_active is set = a question is running
+            b._last_assistant_text = lambda: "[tg] the real answer"
+            b._drain_transcript = lambda: None
+
+            b._handle(_reaction())
+            b._finish_turn()
+
+            self.assertEqual(b.tg.sent, [(7, "the real answer")],
+                             "a reaction mid-turn swallowed the answer to the real question")
 
 
 if __name__ == "__main__":

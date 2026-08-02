@@ -202,6 +202,7 @@ class AttachBridge:
         self._seen_tools: set = set()
         self._tui_seen: set = set()          # Codex TUI scrape: tool lines already shown this turn
         self._turn_text_sent = False         # has any text been forwarded this turn (bubble gate)
+        self._turn_is_reaction = False       # turn opened by a reaction → exempt from the backstop
 
     # ---- transcript resolution --------------------------------------------
     def _codex_sessions_dir(self) -> Path:
@@ -700,7 +701,17 @@ class AttachBridge:
             emojis = "".join(r.get("emoji", "") for r in mr.get("new_reaction", [])
                              if r.get("type") == "emoji")
             if emojis:
+                # A reaction says "no need to reply". The turn-end backstop says "a Telegram turn
+                # must never go unanswered". Those two contradict, and the backstop wins: it
+                # forwarded the agent's INTERNAL note ("No response requested.") to the user
+                # (Genius bridge, 2026-08-02). So a turn opened purely by a reaction is exempt
+                # from the backstop; an explicit [tg] reply still goes out the normal way.
+                # Only when no turn was running: a reaction landing mid-turn must not disarm the
+                # backstop for the real question underneath it.
+                bezi_turn = self._turn_active.is_set()
                 self._begin_turn()
+                if not bezi_turn:
+                    self._turn_is_reaction = True
                 self._inject(f"{emojis} reacted {emojis} to your message #{mr.get('message_id')} "
                              f"— quick feedback; no need to reply unless relevant.")
             return
@@ -752,6 +763,7 @@ class AttachBridge:
         self._max_gap = 0.0
         self._last_typing = now
         self._turn_text_sent = False             # gate TUI bubbles until intro text lands
+        self._turn_is_reaction = False           # set by the reaction branch right after this
         # Seed the TUI dedup with tool lines ALREADY on screen from previous turns, so the
         # scraper only emits calls that appear DURING this turn — otherwise stale lines still
         # visible in the pane get re-sent as bubbles under the new turn.
@@ -976,6 +988,7 @@ class AttachBridge:
         # `_turn_text_sent` guard means this only fires when truly nothing was sent (no double-send),
         # and _send_final sets it True so a second _finish_turn won't re-fire.
         if (was_active and self._turn_from_tg and not self._turn_text_sent
+                and not getattr(self, "_turn_is_reaction", False)
                 and self._owner_chat is not None
                 and getattr(self, "_turn_end_backstop_enabled", True)):
             source = "transcript"
@@ -998,6 +1011,11 @@ class AttachBridge:
                           "signal_configured=%s",
                           dur, self._typing_count, getattr(self, "_transcript", None) is not None,
                           getattr(self, "_signal", None) is not None)
+        elif (was_active and getattr(self, "_turn_is_reaction", False)
+                and not self._turn_text_sent):
+            # Intended silence, but it must still be visible in the log — otherwise a genuinely
+            # lost reply would look exactly the same in the daily traffic analysis.
+            log.info("TURN END reaction turn without a reply (backstop deliberately skipped)")
         self._turn_active.clear()
         self._pending_turn_end = False
         self._consume_turn_end()
