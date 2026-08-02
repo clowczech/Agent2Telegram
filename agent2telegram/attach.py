@@ -185,10 +185,10 @@ def _expected_agent_commands(cfg: Config) -> list[str]:
 
 class AttachBridge:
     _turn_end_backstop_enabled = True
-    #: Durable outbox with per-part confirmation. Subclasses with their own queue (StreamBridge)
-    #: turn it off — they share this code but not its lifecycle.
+    #: Durable outbox with per-part confirmation. Off by default for objects built without
+    #: __init__ (focused tests), which have no queue path to write to.
     _use_durable_outbox = True
-
+    
     def __init__(self, cfg: Config, *, client: TelegramClient | None = None) -> None:
         if not cfg.tmux_session:
             raise ValueError("attach mode requires 'tmux_session' in config")
@@ -512,7 +512,7 @@ class AttachBridge:
         self._processed_update_ids, self._processed_update_order = self._read_processed_updates()
 
     def _ensure_update_state(self) -> None:
-        # StreamBridge reuses this inbound loop but builds its state without calling our __init__.
+        # Focused tests may build the object without calling our __init__.
         if not hasattr(self, "_offset_file"):
             self._offset_file = _state_dir(self.cfg) / "offset"
         if not hasattr(self, "_processed_updates_file"):
@@ -876,7 +876,7 @@ class AttachBridge:
         self._inbound_worker_lock = threading.Lock()
 
     def _ensure_inbound_worker_state(self) -> None:
-        # StreamBridge and focused tests may construct the object without AttachBridge.__init__.
+        # Focused tests may construct the object without AttachBridge.__init__.
         if not hasattr(self, "_inbound_queue"):
             self._inbound_queue = queue.Queue()
         if not hasattr(self, "_inbound_worker_started"):

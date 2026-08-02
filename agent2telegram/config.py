@@ -98,8 +98,8 @@ class Config:
             or self.poll_timeout <= 0
         ):
             raise ConfigError("'poll_timeout' must be positive.")
-        if self.mode not in ("oneshot", "attach", "stream"):
-            raise ConfigError("'mode' must be one of: oneshot, attach, stream.")
+        if self.mode not in ("oneshot", "attach"):
+            raise ConfigError("'mode' must be one of: oneshot, attach.")
 
     def redacted(self) -> dict:
         """A copy safe to print/log: the token is masked."""

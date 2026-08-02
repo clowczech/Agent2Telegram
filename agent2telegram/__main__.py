@@ -46,10 +46,7 @@ def _cmd_run(args) -> int:
                 save(cfg)
         except Exception:
             pass
-    if cfg.mode == "stream":
-        from .stream import StreamBridge
-        StreamBridge(cfg).run()
-    elif cfg.mode == "attach":
+    if cfg.mode == "attach":
         from .attach import AttachBridge
         AttachBridge(cfg).run()
     else:
