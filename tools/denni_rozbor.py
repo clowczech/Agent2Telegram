@@ -17,6 +17,7 @@ Použití:
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import re
 import sys
@@ -63,7 +64,7 @@ def rozbor(radky: list[str]) -> dict:
     v = {
         "turnu": 0, "odpovedi": 0, "turn_bez_odpovedi": 0,
         "inject_selhal": 0, "inject_po_opakovani": 0,
-        "sit_vypadky": 0, "backstop": 0, "vzdane_prilohy": 0,
+        "sit_bezne": 0, "sit_chyby": 0, "backstop": 0, "vzdane_prilohy": 0,
         "nejdelsi_turn": 0.0, "turny_nad_2min": 0,
         "restarty": 0, "duplicity_fronta": 0,
     }
@@ -103,13 +104,83 @@ def rozbor(radky: list[str]) -> dict:
             v["vzdane_prilohy"] += 1
         elif "re-delivery still failing" in r or "stále selhává" in r:
             v["duplicity_fronta"] += 1
-        elif "urlopen error" in r or "Connection reset" in r:
-            v["sit_vypadky"] += 1
+        elif "Connection reset by peer" in r:
+            # Dlouhý dotaz (50 s) ukončený protistranou. Den má ~1700 cyklů, takže tohle je
+            # BĚŽNÝ provoz protokolu, ne incident. Hlásit ho jako "výpadek sítě" znamená
+            # utopit skutečné chyby v šumu (Petr 2026-08-04).
+            v["sit_bezne"] += 1
+        elif "urlopen error" in r or "HTTP 409" in r or "HTTP 502" in r or "timed out" in r:
+            v["sit_chyby"] += 1
     if delky:
         delky.sort()
         v["median_turn"] = delky[len(delky) // 2]
         v["p90_turn"] = delky[int(len(delky) * 0.9)]
     return v
+
+
+STAV_SOUBOR = os.path.join(STATE, "rozbor_stav.json")
+
+# Metriky, u kterých má smysl hlásit ZMĚNU proti minulému rozboru. Klíč = jméno v `rozbor()`,
+# hodnota = (jak se tomu říká lidsky, o kolik se to musí pohnout, aby to stálo za zmínku).
+SLEDOVANE = {
+    "inject_selhal": ("selhání zápisu do okna", 1),
+    "backstop": ("zásah pojistky", 1),
+    "duplicity_fronta": ("opakované neúspěšné odeslání", 1),
+    "vzdane_prilohy": ("vzdaná příloha", 1),
+    "restarty": ("restart bridge", 5),
+    "sit_chyby": ("skutečná síťová chyba", 20),
+    "turny_nad_2min": ("turn delší než dvě minuty", 10),
+}
+
+
+def nacti_stav() -> dict:
+    try:
+        with open(STAV_SOUBOR, encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, ValueError):
+        return {}
+
+
+def uloz_stav(v: dict, dl_pocet: int) -> None:
+    """Zápis přes dočasný soubor – nedokončený rozbor nesmí nechat rozbitý stav."""
+    data = {k: v.get(k, 0) for k in SLEDOVANE}
+    data["dead_letter"] = dl_pocet
+    tmp = f"{STAV_SOUBOR}.{os.getpid()}.tmp"
+    try:
+        os.makedirs(os.path.dirname(STAV_SOUBOR), exist_ok=True)
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False, sort_keys=True)
+        os.replace(tmp, STAV_SOUBOR)
+    except OSError as e:
+        print(f"stav rozboru se nepodařilo uložit: {e}", file=sys.stderr)
+
+
+def zmeny(v: dict, dl_pocet: int, minule: dict) -> list[str]:
+    """Co je proti minulému rozboru NOVÉ, ZHORŠENÉ nebo VYŘEŠENÉ.
+
+    Bez tohohle vypadá rozbor každý den stejně a po týdnu ho nikdo nečte. Stejný princip
+    jako sekce "Změny oproti poslednímu auditu" v security reportu (Petr 2026-08-04).
+    """
+    if not minule:
+        return ["- První rozbor s pamětí, srovnávat nemám s čím."]
+    out = []
+    for klic, (nazev, prah) in SLEDOVANE.items():
+        ted, drive = v.get(klic, 0), minule.get(klic, 0)
+        rozdil = ted - drive
+        if drive == 0 and ted > 0:
+            out.append(f"- 🆕 Nové: {nazev} – {ted}× (včera nic).")
+        elif ted == 0 and drive > 0:
+            out.append(f"- ✅ Vyřešeno: {nazev} už se neopakuje (včera {drive}×).")
+        elif rozdil >= prah:
+            out.append(f"- 🔺 Zhoršeno: {nazev} {drive}× → {ted}×.")
+        elif -rozdil >= prah:
+            out.append(f"- 🔻 Zlepšeno: {nazev} {drive}× → {ted}×.")
+    dl_drive = minule.get("dead_letter", 0)
+    if dl_pocet > dl_drive:
+        out.append(f"- 🆕 Nové: v odkladišti přibylo {dl_pocet - dl_drive} zpráv.")
+    elif dl_pocet < dl_drive:
+        out.append(f"- ✅ Vyřešeno: odkladiště se zmenšilo z {dl_drive} na {dl_pocet}.")
+    return out or ["- Nic nového, stav odpovídá včerejšku."]
 
 
 def dead_letter() -> tuple[int, list[str]]:
@@ -150,6 +221,7 @@ def main() -> int:
 
     v = rozbor(radky)
     dl_pocet, dl_ukazky = dead_letter()
+    minule = nacti_stav()
     sti = stiznosti(radky)
 
     # `turn_bez_odpovedi` ZÁMĚRNĚ nespouští poplach: log nerozlišuje, jestli turn přišel
@@ -178,12 +250,18 @@ def main() -> int:
         r.append("- odkladiště prázdné")
         r.append("")
 
+    r.append("🆕 Změny oproti minulému rozboru:")
+    r.extend(zmeny(v, dl_pocet, minule))
+    r.append("")
+
     r.append("📊 Provoz:")
     r.append(f"- {v['odpovedi']} zpráv, {v['restarty']} restartů")
     r.append(f"- odezva obvykle {v.get('median_turn', 0):.0f} s")
     r.append(f"- nejhorší případ {v['nejdelsi_turn']:.0f} s")
-    if v["sit_vypadky"]:
-        r.append(f"- {v['sit_vypadky']} výpadků sítě, všechny přežity")
+    if v["sit_bezne"]:
+        r.append(f"- {v['sit_bezne']}× se znovu navázalo spojení (běžné, bez dopadu)")
+    if v["sit_chyby"]:
+        r.append(f"- {v['sit_chyby']} skutečných síťových chyb (DNS, 409, 502, timeout)")
     r.append("")
 
     potize = []
@@ -206,20 +284,38 @@ def main() -> int:
         r.append("- to má přednost před vším ostatním")
         r.append("")
 
-    r.append("🔧 Co s tím:")
+    # Číslované, aby na ně Petr mohl odpovědět "oprav 1 a 3" – stejně jako u security
+    # reportu (jeho zadání 2026-08-04). Bez čísel se dá odpovědět jen "oprav to všechno".
+    akce = []
     if ztraty:
-        r.append("- jdu najít příčinu těch nedoručených")
-    elif sti:
-        r.append("- projdu, co se dělo v tu chvíli, cos psal")
-    elif v["inject_selhal"] and not v["inject_po_opakovani"]:
-        r.append("- zápis do okna selhává a opakování nepomáhá, podívám se na to")
-    elif v["restarty"] > 2:
-        r.append(f"- {v['restarty']} restartů je moc, zjistím proč")
-    elif problem:
-        r.append("- prohlédnu si detaily v logu")
+        akce.append("Najít příčinu nedoručených zpráv a vyprázdnit odkladiště.")
+    if sti:
+        akce.append("Projít log v časech, kdy jsi psal, že něco nedorazilo.")
+    if v["inject_selhal"] and not v["inject_po_opakovani"]:
+        akce.append("Zápis do okna selhává a opakování nepomáhá – zjistit proč.")
+    if v["restarty"] > 5:
+        akce.append(f"{v['restarty']} restartů je hodně, dohledat příčinu.")
+    if v["duplicity_fronta"]:
+        akce.append("Prověřit záznamy, které se opakovaně nedařilo odeslat.")
+    if v["sit_chyby"] > 50:
+        akce.append(f"{v['sit_chyby']} síťových chyb je nad běžnou hladinou – prověřit DNS a VPN.")
+    if v["backstop"]:
+        akce.append("Projít turny, kde musela zaskočit pojistka – odpověď tam chyběla.")
+
+    if akce:
+        r.append("🔧 Doporučené akce:")
+        for i, text in enumerate(akce, 1):
+            r.append(f"- {i}. {text}")
+        r.append("- Odpověz čísly, co mám opravit.")
     else:
-        r.append("- nic, jen sleduju dál")
+        r.append("🔧 Doporučené akce:")
+        r.append("- Žádné, provoz je čistý. Sleduju dál.")
+    r.append("")
+
     print("\n".join(_uprav_odrazky(r)))
+    # Stav se ukládá až po vypsání – když rozbor spadne, zítřek porovná proti témuž základu.
+    uloz_stav(v, dl_pocet)
+    return 0
 
 
 def _uprav_odrazky(radky: list[str]) -> list[str]:
@@ -238,7 +334,6 @@ def _uprav_odrazky(radky: list[str]) -> list[str]:
             radek = "- " + text
         hotovo.append(radek)
     return hotovo
-    return 0
 
 
 if __name__ == "__main__":
