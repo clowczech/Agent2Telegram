@@ -96,5 +96,59 @@ class StavTests(unittest.TestCase):
                 rozbor_mod.STAV_SOUBOR = puvodni
 
 
+class VyberDnuTests(unittest.TestCase):
+    """Do 2026-08-04 log neměl datum a "denní" rozbor sčítal celé okno – u Petra zhruba měsíc.
+    Číslo vydávané za denní musí být buď opravdu denní, nebo hlasitě označené jako jiné."""
+
+    def test_undated_lines_are_flagged_loudly(self):
+        radky = ["09:00:00 INFO x", "09:00:01 INFO y"]
+
+        vybrane, popis = rozbor_mod.vyber_dny(radky, dny=1)
+
+        self.assertEqual(vybrane, radky)
+        self.assertIn("NENÍ denní", popis)
+
+    def test_only_the_last_day_is_measured(self):
+        radky = [
+            "2026-08-02 09:00:00 INFO stary",
+            "2026-08-03 09:00:00 INFO vcerejsi",
+            "2026-08-04 09:00:00 INFO dnesni",
+            "2026-08-04 10:00:00 INFO dnesni2",
+        ]
+
+        vybrane, popis = rozbor_mod.vyber_dny(radky, dny=1)
+
+        self.assertEqual(len(vybrane), 2, "do denního čísla se dostaly i jiné dny")
+        self.assertIn("2026-08-04", popis)
+
+    def test_more_days_can_be_requested(self):
+        radky = [f"2026-08-0{d} 09:00:00 INFO r" for d in (1, 2, 3, 4)]
+
+        vybrane, popis = rozbor_mod.vyber_dny(radky, dny=3)
+
+        self.assertEqual(len(vybrane), 3)
+        self.assertIn("3 dny", popis)
+
+    def test_a_specific_day_can_be_picked(self):
+        radky = ["2026-08-03 09:00:00 INFO a", "2026-08-04 09:00:00 INFO b"]
+
+        vybrane, popis = rozbor_mod.vyber_dny(radky, dny=1, den="2026-08-03")
+
+        self.assertEqual(vybrane, [radky[0]])
+        self.assertIn("2026-08-03", popis)
+
+    def test_undated_lines_are_dropped_once_dated_ones_exist(self):
+        radky = ["09:00:00 INFO bez data", "2026-08-04 09:00:00 INFO s datem"]
+
+        vybrane, popis = rozbor_mod.vyber_dny(radky, dny=1)
+
+        self.assertEqual(vybrane, [radky[1]], "řádek bez data se přimíchal do denního čísla")
+        self.assertIn("vynechala", popis)
+
+    def test_time_is_still_parsed_from_a_dated_line(self):
+        self.assertEqual(rozbor_mod._cas("2026-08-04 01:02:03 INFO x"), 3723)
+        self.assertEqual(rozbor_mod._cas("01:02:03 INFO x"), 3723)
+
+
 if __name__ == "__main__":
     unittest.main()

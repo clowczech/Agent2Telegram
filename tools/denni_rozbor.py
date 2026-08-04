@@ -27,7 +27,8 @@ from datetime import datetime, timedelta
 LOG = os.path.expanduser("~/.claude/telegram-bridge/logs/agent2telegram.out.log")
 STATE = os.path.expanduser("~/.local/state/agent2telegram")
 
-TS = re.compile(r"^(\d{2}):(\d{2}):(\d{2})\s+(\w+)\s+")
+# Datum je volitelné: řádky před 2026-08-04 mají jen čas.
+TS = re.compile(r"^(?:(\d{4}-\d{2}-\d{2})\s+)?(\d{2}):(\d{2}):(\d{2})\s+(\w+)\s+")
 TURN_START = "TURN START"
 TURN_END = "TURN END"
 FWD = "FWD (send)"
@@ -45,8 +46,41 @@ def _cas(radek: str):
     m = TS.match(radek)
     if not m:
         return None
-    h, mi, s = int(m.group(1)), int(m.group(2)), int(m.group(3))
+    h, mi, s = int(m.group(2)), int(m.group(3)), int(m.group(4))
     return h * 3600 + mi * 60 + s
+
+
+def _datum(radek: str) -> str | None:
+    """Datum řádku, nebo None u starších řádků, které ho ještě nemají."""
+    m = TS.match(radek)
+    return m.group(1) if m else None
+
+
+def vyber_dny(radky: list[str], dny: int, den: str | None = None) -> tuple[list[str], str]:
+    """Vybere řádky za posledních `dny` dní (nebo za konkrétní `den`).
+
+    Vrací i větu o tom, co se doopravdy měřilo. Do 2026-08-04 log datum neměl, takže
+    starší řádky vybrat nejdou – radši to řekneme nahlas, než abychom je tiše přimíchali
+    a vydávali měsíční součty za denní (přesně to se dělo).
+    """
+    s_datem = [r for r in radky if _datum(r)]
+    if not s_datem:
+        return radky, ("⚠️ Log ještě nemá datum, takže tohle NENÍ denní číslo – "
+                       f"je to součet za posledních {len(radky)} řádků.")
+    dostupne = sorted({_datum(r) for r in s_datem})
+    if den:
+        chtene = {den}
+        popis = f"Měřený den: {den}."
+    else:
+        chtene = set(dostupne[-dny:])
+        popis = (f"Měřený úsek: {min(chtene)} až {max(chtene)}"
+                 + (f" ({len(chtene)} dny)." if len(chtene) > 1 else "."))
+    vybrane = [r for r in s_datem if _datum(r) in chtene]
+    if not vybrane:
+        return [], f"Za {den or 'zvolený úsek'} nejsou v logu žádné řádky."
+    if len(s_datem) < len(radky):
+        popis += f" Starší řádky bez data ({len(radky) - len(s_datem)}) jsem vynechala."
+    return vybrane, popis
 
 
 def nacti(cesta: str) -> list[str]:
@@ -59,8 +93,7 @@ def nacti(cesta: str) -> list[str]:
 
 
 def rozbor(radky: list[str]) -> dict:
-    """Log nemá datum, jen čas – proto se počítá přes celý předaný úsek.
-    Volající si vybere, kolik ho zajímá (typicky poslední den)."""
+    """Spočítá metriky nad předanými řádky. Výběr úseku dělá `vyber_dny()`."""
     v = {
         "turnu": 0, "odpovedi": 0, "turn_bez_odpovedi": 0,
         "inject_selhal": 0, "inject_po_opakovani": 0,
@@ -210,13 +243,21 @@ def stiznosti(radky: list[str]) -> list[str]:
 def main() -> int:
     p = argparse.ArgumentParser()
     p.add_argument("--log", default=LOG)
-    p.add_argument("--radku", type=int, default=4000,
-                   help="kolik posledních řádků logu brát (log nemá datum)")
+    p.add_argument("--dny", type=int, default=1,
+                   help="kolik posledních dní z logu měřit (výchozí 1)")
+    p.add_argument("--den", help="konkrétní den ve formátu RRRR-MM-DD")
+    p.add_argument("--radku", type=int, default=200_000,
+                   help="strop načtených řádků; samotný výběr dne dělá --dny/--den")
     a = p.parse_args()
 
     radky = nacti(a.log)[-a.radku:]
     if not radky:
         print("PRÁZDNÝ LOG – nemám co měřit (samo o sobě podezřelé)")
+        return 1
+
+    radky, popis_useku = vyber_dny(radky, a.dny, a.den)
+    if not radky:
+        print(popis_useku)
         return 1
 
     v = rozbor(radky)
@@ -255,6 +296,7 @@ def main() -> int:
     r.append("")
 
     r.append("📊 Provoz:")
+    r.append(f"- {popis_useku}")
     r.append(f"- {v['odpovedi']} zpráv, {v['restarty']} restartů")
     r.append(f"- odezva obvykle {v.get('median_turn', 0):.0f} s")
     r.append(f"- nejhorší případ {v['nejdelsi_turn']:.0f} s")

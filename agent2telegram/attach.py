@@ -1250,6 +1250,10 @@ class AttachBridge:
                 f"Message: {nahled}\n{reason}\n\n"
                 "The agent may be frozen. Check the tmux pane, then send it again.",
             )
+            # Log it: without this the daily report sees "N injects failed" but cannot tell
+            # whether the user was ever told. That is the exact blind spot delivery logging
+            # was added to close (2026-08-04).
+            log.info("inject failure reported to the owner %r", nahled[:40])
         except Exception as e:
             log.warning("inject-failure notification failed: %s", e)
 

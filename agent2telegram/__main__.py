@@ -20,7 +20,10 @@ def _setup_logging(verbose: bool) -> None:
     logging.basicConfig(
         level=logging.DEBUG if verbose else logging.INFO,
         format="%(asctime)s %(levelname)-7s %(name)s: %(message)s",
-        datefmt="%H:%M:%S",
+        # Datum, ne jen čas. Bez něj se v logu nedá poznat, kde končí den, takže "denní"
+        # rozbor ve skutečnosti sčítal celé okno logu — u Petra zhruba měsíc (2026-08-04).
+        # Kdo log parsuje, musí počítat s volitelným datovým prefixem.
+        datefmt="%Y-%m-%d %H:%M:%S",
     )
 
 
