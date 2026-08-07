@@ -1393,6 +1393,18 @@ class AttachBridge:
                 "Usage: `/setkey <your ElevenLabs API key>` — enables voice-message transcription.\n"
                 "I'll delete your message right after so the key isn't left in the chat.")
             return True
+        from . import stt
+        if not stt.looks_like_api_key(key):
+            # Caught here, the user retypes once. Caught at the first voice message, it
+            # looks like the bridge is broken (2026-08-07: a legacy key sat in every
+            # config and every bot answered "HTTP 400" without saying why).
+            if message_id is not None:
+                self.tg.delete_message(chat_id, message_id)
+            self.tg.send_message(chat_id,
+                "That doesn't look like an ElevenLabs key — they start with `sk_`. "
+                "Grab a fresh one at elevenlabs.io → Profile → API Keys and send "
+                "`/setkey sk_…` again. (Your message is deleted either way.)")
+            return True
         self.cfg.elevenlabs_api_key = key
         try:
             from .config import mark_secret_from_file, save

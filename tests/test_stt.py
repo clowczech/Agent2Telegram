@@ -175,3 +175,62 @@ class STTTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ChybaRekneProc(unittest.TestCase):
+    """HTTP kód sám o sobě neřekne nic. 2026-08-07 hlásily všechny čtyři boty
+    „HTTP 400: Bad Request" a v těle odpovědi celou dobu stálo, že klíč má začínat
+    „sk_". Hodina hledání kvůli zahozenému tělu odpovědi."""
+
+    def _http_error(self, code: int, telo: bytes):
+        return urllib.error.HTTPError(
+            "https://api.elevenlabs.io/v1/speech-to-text", code, "Bad Request",
+            {}, io.BytesIO(telo),
+        )
+
+    def test_telo_odpovedi_je_v_chybe(self):
+        err = self._http_error(400, json.dumps({
+            "detail": {"status": "invalid_api_key_prefix",
+                       "message": "API key must start with 'sk_'."}
+        }).encode())
+
+        popis = stt._describe_error(err)
+
+        self.assertIn("400", popis)
+        self.assertIn("sk_", popis, f"tělo odpovědi se zahodilo: {popis}")
+
+    def test_klic_v_tele_se_nedostane_do_logu(self):
+        err = self._http_error(400, json.dumps({
+            "detail": "bad key sk_abcdef0123456789abcdef0123456789"
+        }).encode())
+
+        popis = stt._describe_error(err)
+
+        self.assertNotIn("sk_abcdef0123456789", popis, "klíč prošel do hlášky")
+        self.assertIn("[redacted]", popis)
+
+    def test_nectitelne_telo_chybu_neshodi(self):
+        err = self._http_error(500, b"\xff\xfe nesmysl")
+
+        popis = stt._describe_error(err)
+
+        self.assertIn("500", popis)
+
+    def test_prazdne_telo_nechá_hlasku_cistou(self):
+        err = self._http_error(404, b"")
+
+        self.assertEqual(stt._describe_error(err), "HTTP 404: Bad Request")
+
+
+class TvarKlice(unittest.TestCase):
+    """Špatný klíč se má poznat při zadání, ne až u první hlasovky."""
+
+    def test_stary_format_neprojde(self):
+        self.assertFalse(stt.looks_like_api_key("5bd" + "0" * 61))
+
+    def test_novy_format_projde(self):
+        self.assertTrue(stt.looks_like_api_key("sk_" + "a" * 48))
+        self.assertTrue(stt.looks_like_api_key("  sk_" + "a" * 48 + "  "))
+
+    def test_prazdny_klic_neprojde(self):
+        self.assertFalse(stt.looks_like_api_key(""))
