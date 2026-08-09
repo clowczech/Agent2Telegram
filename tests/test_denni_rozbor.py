@@ -180,3 +180,52 @@ class PocitaniOdpovediTests(unittest.TestCase):
         cizi = "2026-08-09 09:00:00 INFO    agent2telegram.attach: TURN START t=123"
 
         self.assertNotIn(rozbor_mod.FWD, cizi)
+
+
+class ZdraviTests(unittest.TestCase):
+    """Skóre musí umět spadnout a nesmí chválit ticho.
+
+    Petr 2026-08-09: chce každý den vidět v procentech, jak bridge jede, a při stu
+    procentech ho nasadí na GitHub a použije na webináři. Číslo, které ukazuje 100 %
+    i ve dnech, kdy se nic nedělo, je proto horší než žádné.
+    """
+
+    CISTY = {"odpovedi": 50, "restarty": 0, "turny_nad_2min": 0, "sit_chyby": 0,
+             "inject_selhal": 0, "duplicity_fronta": 0, "vzdane_prilohy": 0}
+
+    def test_bezvadny_den_ma_sto_procent(self):
+        pct, duvody = rozbor_mod.zdravi(self.CISTY, dl_pocet=0, sti=0)
+
+        self.assertEqual(pct, 100)
+        self.assertEqual(duvody, [])
+
+    def test_tichy_den_se_nehodnoti(self):
+        pct, duvody = rozbor_mod.zdravi({"odpovedi": 1}, dl_pocet=0, sti=0)
+
+        self.assertIsNone(pct, "málo provozu se vydávalo za stoprocentní zdraví")
+        self.assertTrue(duvody)
+
+    def test_ztracena_zprava_srazi_nejvic(self):
+        pct, _ = rozbor_mod.zdravi(self.CISTY, dl_pocet=1, sti=0)
+
+        self.assertLess(pct, 70, "ztráta zprávy musí být vidět na první pohled")
+
+    def test_petrova_stiznost_srazi_skore(self):
+        pct, duvody = rozbor_mod.zdravi(self.CISTY, dl_pocet=0, sti=1)
+
+        self.assertLessEqual(pct, 75)
+        self.assertTrue(any("nedorazilo" in d for d in duvody))
+
+    def test_skore_nikdy_nejde_pod_nulu(self):
+        hrozne = dict(self.CISTY, restarty=99, turny_nad_2min=99, sit_chyby=99,
+                      inject_selhal=99, duplicity_fronta=99, vzdane_prilohy=99)
+
+        pct, _ = rozbor_mod.zdravi(hrozne, dl_pocet=99, sti=99)
+
+        self.assertEqual(pct, 0)
+
+    def test_jednotlive_srazky_maji_strop(self):
+        """Jeden opakující se jev nesmí sám o sobě přebít všechno ostatní."""
+        pct, _ = rozbor_mod.zdravi(dict(self.CISTY, sit_chyby=1000), dl_pocet=0, sti=0)
+
+        self.assertGreaterEqual(pct, 90)

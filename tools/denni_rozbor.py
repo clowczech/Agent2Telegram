@@ -170,6 +170,51 @@ SLEDOVANE = {
 }
 
 
+#: Kolik odpovědí musí projít, aby mělo smysl počítat procenta. Pod tímhle počtem je
+#: „100 %" jen důkaz, že se nic nedělo – a přesně takové číslo report hlásil, když
+#: počítal zprávy řetězcem, který bridge už nepsal (2026-08-09).
+MIN_PROVOZ = 5
+
+#: Srážky za jednotlivé jevy: (klíč, kolik bodů za kus, strop). Ztráta zprávy a Petrova
+#: stížnost stojí nejvíc schválně – to jsou jediné dva jevy, které pozná uživatel.
+SRAZKY = (
+    ("dead_letter",     34, 100, "zpráva v odkladišti"),
+    ("stiznosti",       25, 100, "Petr hlásil, že nedorazilo"),
+    ("vzdane_prilohy",  20, 60,  "vzdaná příloha"),
+    ("inject_selhal",   15, 45,  "selhání zápisu do okna"),
+    ("duplicity_fronta", 8, 24,  "opakované neúspěšné odeslání"),
+    ("restarty",         3, 12,  "restart bridge"),
+    ("turny_nad_2min",   1, 8,   "turn přes dvě minuty"),
+    ("sit_chyby",        1, 6,   "skutečná síťová chyba"),
+)
+
+
+def zdravi(v: dict, dl_pocet: int, sti: int) -> tuple[int | None, list[str]]:
+    """Zdraví bridge v procentech, nebo None, když na to nebylo dost provozu.
+
+    Sto procent musí znamenat „všechno prošlo", ne „nic se nedělo". Proto se při provozu
+    pod `MIN_PROVOZ` procenta NEHLÁSÍ – tichý den není zdravý den, o tom nic nevíme.
+    Skóre nesmí být pochvala; musí umět spadnout, jinak ho nikdo nebude číst.
+    """
+    if v.get("odpovedi", 0) < MIN_PROVOZ:
+        return None, [f"provoz {v.get('odpovedi', 0)} odpovědí – málo na hodnocení"]
+
+    zdroj = dict(v)
+    zdroj["dead_letter"] = dl_pocet
+    zdroj["stiznosti"] = sti
+
+    skore = 100
+    duvody: list[str] = []
+    for klic, za_kus, strop, nazev in SRAZKY:
+        pocet = int(zdroj.get(klic, 0) or 0)
+        if not pocet:
+            continue
+        srazka = min(pocet * za_kus, strop)
+        skore -= srazka
+        duvody.append(f"−{srazka} % … {nazev} ({pocet}×)")
+    return max(0, skore), duvody
+
+
 def nacti_stav() -> dict:
     try:
         with open(STAV_SOUBOR, encoding="utf-8") as f:
@@ -178,10 +223,12 @@ def nacti_stav() -> dict:
         return {}
 
 
-def uloz_stav(v: dict, dl_pocet: int) -> None:
+def uloz_stav(v: dict, dl_pocet: int, zdravi_procenta: int | None = None) -> None:
     """Zápis přes dočasný soubor – nedokončený rozbor nesmí nechat rozbitý stav."""
     data = {k: v.get(k, 0) for k in SLEDOVANE}
     data["dead_letter"] = dl_pocet
+    if zdravi_procenta is not None:
+        data["zdravi"] = zdravi_procenta
     tmp = f"{STAV_SOUBOR}.{os.getpid()}.tmp"
     try:
         os.makedirs(os.path.dirname(STAV_SOUBOR), exist_ok=True)
@@ -268,6 +315,7 @@ def main() -> int:
     dl_pocet, dl_ukazky = dead_letter()
     minule = nacti_stav()
     sti = stiznosti(radky)
+    zdravi_pct, zdravi_duvody = zdravi(v, dl_pocet, sti)
 
     # `turn_bez_odpovedi` ZÁMĚRNĚ nespouští poplach: log nerozlišuje, jestli turn přišel
     # z Telegramu, nebo z terminálu – a terminálový turn odpověď na Telegram mít nemá.
@@ -281,6 +329,24 @@ def main() -> int:
     # pro Petra, proto sekce "Co s tím" na konci.
     ztraty = dl_pocet + v["vzdane_prilohy"]
     r = []
+
+    # Skóre patří nahoru: Petr chce na první pohled vidět, jak bridge jede (2026-08-09).
+    # Cesta ke stu procent je zároveň cesta na GitHub – tohle číslo je vstupenka.
+    if zdravi_pct is None:
+        r.append("📈 Zdraví bridge: nelze změřit")
+        r.extend(f"- {d}" for d in zdravi_duvody)
+    else:
+        znak = "🟢" if zdravi_pct >= 95 else ("🟡" if zdravi_pct >= 80 else "🔴")
+        drive = minule.get("zdravi")
+        trend = ""
+        if isinstance(drive, int) and drive != zdravi_pct:
+            trend = f" (včera {drive} %, {'lepší' if zdravi_pct > drive else 'horší'} o {abs(zdravi_pct - drive)})"
+        r.append(f"📈 Zdraví bridge: {znak} {zdravi_pct} %{trend}")
+        if zdravi_duvody:
+            r.extend(f"- {d}" for d in zdravi_duvody)
+        else:
+            r.append("- Bez jediné srážky. Tohle je ten stav, který chceme na GitHub.")
+    r.append("")
 
     if ztraty:
         r.append("❌ Ztracené zprávy:")
@@ -360,7 +426,7 @@ def main() -> int:
 
     print("\n".join(_uprav_odrazky(r)))
     # Stav se ukládá až po vypsání – když rozbor spadne, zítřek porovná proti témuž základu.
-    uloz_stav(v, dl_pocet)
+    uloz_stav(v, dl_pocet, zdravi_pct)
     return 0
 
 
