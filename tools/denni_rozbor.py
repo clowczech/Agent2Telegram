@@ -31,7 +31,11 @@ STATE = os.path.expanduser("~/.local/state/agent2telegram")
 TS = re.compile(r"^(?:(\d{4}-\d{2}-\d{2})\s+)?(\d{2}):(\d{2}):(\d{2})\s+(\w+)\s+")
 TURN_START = "TURN START"
 TURN_END = "TURN END"
-FWD = "FWD (send)"
+#: Bridge odeslání loguje pěti různými způsoby a řetězec se v čase měnil. Počítat jeden
+#: konkrétní tvar znamená počítat nulu – přesně to se dělo od přechodu na `(delivered)`:
+#: report hlásil „0 zpráv" ve dnech, kdy jich prošlo přes padesát (nalezeno 2026-08-09).
+#: Proto se hledá společný prefix, ne konkrétní varianta.
+FWD = "FWD ("
 
 # Fráze, kterými Petr hlásí, že něco nedorazilo. Tohle je nejpřesnější měřítko, jaké máme –
 # je to jeho vlastní zkušenost, ne naše metrika.

@@ -152,3 +152,31 @@ class VyberDnuTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class PocitaniOdpovediTests(unittest.TestCase):
+    """Report hlásil „0 zpráv" ve dnech, kdy jich prošlo přes padesát.
+
+    Počítal řetězec `FWD (send)`, jenže bridge přešel na `FWD (delivered)` a starou
+    variantu píše jako `FWD (send, legacy path)` – tedy s čárkou, takže nesedělo ani to.
+    Řádky níž jsou VÝŘEZY SKUTEČNÉHO LOGU, ne vymyšlený formát; přesně na tomhle
+    rozdílu spadlo 2026-08-06 i měření Lynisu (audit).
+    """
+
+    REALNE_RADKY = [
+        "2026-08-09 09:02:09 INFO    agent2telegram.attach: FWD (delivered) id=out-017 1 parts, 0 attachments 'ahoj'",
+        "13:34:03 INFO    agent2telegram.attach: FWD (send, legacy path) '**Prepnuto a bezi.'",
+        "2026-08-09 08:11:00 INFO    agent2telegram.attach: FWD (re-delivered) 'neco'",
+        "2026-08-09 08:12:00 INFO    agent2telegram.attach: FWD (voice) 'hlasovka'",
+    ]
+
+    def test_vsechny_varianty_odeslani_se_pocitaji(self):
+        napocteno = sum(1 for r in self.REALNE_RADKY if rozbor_mod.FWD in r)
+
+        self.assertEqual(napocteno, len(self.REALNE_RADKY),
+                         "některá varianta FWD se nepočítá – report bude hlásit míň, než prošlo")
+
+    def test_radek_bez_odeslani_se_nepocita(self):
+        cizi = "2026-08-09 09:00:00 INFO    agent2telegram.attach: TURN START t=123"
+
+        self.assertNotIn(rozbor_mod.FWD, cizi)
