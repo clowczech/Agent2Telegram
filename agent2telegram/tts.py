@@ -26,9 +26,10 @@ import urllib.request
 log = logging.getLogger("agent2telegram.tts")
 
 TTS_URL = "https://api.elevenlabs.io/v1/text-to-speech/{voice_id}"
-#: Multilingual so the voice follows the CONVERSATION's language (Czech, English, …) from the
-#: text itself — no explicit language flag needed.
-DEFAULT_MODEL_ID = "eleven_multilingual_v2"
+#: Eleven v3 (out of alpha 2026-08; Petr 2026-08-21: generovat vše přes v3). Multilingual → voice
+#: follows the CONVERSATION's language from the text itself. v3 = přesnější čísla + stabilnější
+#: generace než v2 (error rate 15,3 % → 4,9 %). STT/Scribe (přepis) tím NENÍ dotčen – opačný proces.
+DEFAULT_MODEL_ID = "eleven_v3"
 #: ElevenLabs returns mp3 here; the bridge converts to OGG/OPUS (ffmpeg) before sendVoice.
 DEFAULT_OUTPUT_FORMAT = "mp3_44100_128"
 TRANSIENT_BACKOFFS = (1.0, 3.0)
