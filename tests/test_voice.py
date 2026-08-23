@@ -55,16 +55,16 @@ class MarkerInjectionTests(unittest.TestCase):
     def test_voice_on_injects_hint_ahead_of_message(self):
         with tempfile.TemporaryDirectory() as td:
             b = _voice_bridge(td, on=True)
-            b._handle(_msg(1, "co je nového?"))
+            b._handle(_msg(1, "what is new?"))
             self.assertTrue(b._session.injected, "message should reach the session")
             injected = b._session.injected[0]
             self.assertIn(VOICE_MODE_HINT, injected)
-            self.assertIn("co je nového?", injected)
+            self.assertIn("what is new?", injected)
 
     def test_voice_off_does_not_inject_hint(self):
         with tempfile.TemporaryDirectory() as td:
             b = _voice_bridge(td, on=False)
-            b._handle(_msg(1, "co je nového?"))
+            b._handle(_msg(1, "what is new?"))
             self.assertTrue(b._session.injected)
             self.assertNotIn(VOICE_MODE_HINT, b._session.injected[0])
 
@@ -78,7 +78,7 @@ class DeliveryDecisionTests(unittest.TestCase):
             b = _voice_bridge(td, on=True)
             calls = []
             b._try_send_voice = lambda t: (calls.append(t) or True)
-            b._send_final("Ahoj, mám hotovo.", key="k1")
+            b._send_final("Hi, all done.", key="k1")
             self.assertEqual(len(calls), 1, "voice should be attempted")
             self.assertEqual(b.tg.sent, [], "no text should be sent when voice succeeds")
             self.assertIn("k1", b._sent_keys)
@@ -87,7 +87,7 @@ class DeliveryDecisionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             b = _voice_bridge(td, on=True)
             b._try_send_voice = lambda t: False        # TTS/ffmpeg/network down
-            b._send_final("Ahoj, mám hotovo.", key="k2")
+            b._send_final("Hi, all done.", key="k2")
             self.assertTrue(b.tg.sent, "reply must still arrive as text")
             self.assertTrue(any("voice unavailable" in s.lower() for s in b.tg.sent),
                             "and say why it came as text")
@@ -97,8 +97,9 @@ class DeliveryDecisionTests(unittest.TestCase):
             b = _voice_bridge(td, on=True)
             called = []
             b._try_send_voice = lambda t: called.append(t) or True
-            # Odvozeno od konstanty, ne pevné číslo: limit se 2026-08-01 zvedl z 600 na 1200
-            # a test s natvrdo napsanou délkou tím spadl. Test má hlídat CHOVÁNÍ, ne hodnotu.
+            # Derived from the constant, not a hard-coded number: the limit went from 600 to
+            # 1200 on 2026-08-01 and a test with the length written in broke. A test should guard
+            # BEHAVIOUR, not a value.
             long_text = "x" * (attach_mod.VOICE_MAX_CHARS + 100)
             b._send_final(long_text, key="k3")
             self.assertEqual(called, [], "a long reply must not be spoken")

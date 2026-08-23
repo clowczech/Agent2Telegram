@@ -177,58 +177,58 @@ if __name__ == "__main__":
     unittest.main()
 
 
-class ChybaRekneProc(unittest.TestCase):
-    """HTTP kód sám o sobě neřekne nic. 2026-08-07 hlásily všechny čtyři boty
-    „HTTP 400: Bad Request" a v těle odpovědi celou dobu stálo, že klíč má začínat
-    „sk_". Hodina hledání kvůli zahozenému tělu odpovědi."""
+class ErrorSaysWhy(unittest.TestCase):
+    """An HTTP status on its own says nothing. Every bot once reported plain
+    "HTTP 400: Bad Request" while the response body had been saying all along that the key must
+    start with "sk_" — an hour of searching, caused by a discarded response body."""
 
-    def _http_error(self, code: int, telo: bytes):
+    def _http_error(self, code: int, body: bytes):
         return urllib.error.HTTPError(
             "https://api.elevenlabs.io/v1/speech-to-text", code, "Bad Request",
-            {}, io.BytesIO(telo),
+            {}, io.BytesIO(body),
         )
 
-    def test_telo_odpovedi_je_v_chybe(self):
+    def test_response_body_reaches_the_message(self):
         err = self._http_error(400, json.dumps({
             "detail": {"status": "invalid_api_key_prefix",
                        "message": "API key must start with 'sk_'."}
         }).encode())
 
-        popis = stt._describe_error(err)
+        described = stt._describe_error(err)
 
-        self.assertIn("400", popis)
-        self.assertIn("sk_", popis, f"tělo odpovědi se zahodilo: {popis}")
+        self.assertIn("400", described)
+        self.assertIn("sk_", described, f"the response body was discarded: {described}")
 
-    def test_klic_v_tele_se_nedostane_do_logu(self):
+    def test_a_key_in_the_body_never_reaches_the_log(self):
         err = self._http_error(400, json.dumps({
             "detail": "bad key sk_abcdef0123456789abcdef0123456789"
         }).encode())
 
-        popis = stt._describe_error(err)
+        described = stt._describe_error(err)
 
-        self.assertNotIn("sk_abcdef0123456789", popis, "klíč prošel do hlášky")
-        self.assertIn("[redacted]", popis)
+        self.assertNotIn("sk_abcdef0123456789", described, "the key leaked into the message")
+        self.assertIn("[redacted]", described)
 
-    def test_nectitelne_telo_chybu_neshodi(self):
-        err = self._http_error(500, b"\xff\xfe nesmysl")
+    def test_an_unreadable_body_does_not_break_the_error(self):
+        err = self._http_error(500, b"\xff\xfe garbage")
 
-        popis = stt._describe_error(err)
+        described = stt._describe_error(err)
 
-        self.assertIn("500", popis)
+        self.assertIn("500", described)
 
-    def test_prazdne_telo_nechá_hlasku_cistou(self):
+    def test_an_empty_body_leaves_the_message_clean(self):
         err = self._http_error(404, b"")
 
         self.assertEqual(stt._describe_error(err), "HTTP 404: Bad Request")
 
 
-class TvarKlice(unittest.TestCase):
-    """Špatný klíč se má poznat při zadání, ne až u první hlasovky."""
+class KeyShape(unittest.TestCase):
+    """A malformed key should be caught when it is entered, not at the first voice note."""
 
-    def test_stary_format_neprojde(self):
+    def test_the_old_format_is_rejected(self):
         self.assertFalse(stt.looks_like_api_key("5bd" + "0" * 61))
 
-    def test_novy_format_projde(self):
+    def test_the_new_format_is_accepted(self):
         self.assertTrue(stt.looks_like_api_key("sk_" + "a" * 48))
         self.assertTrue(stt.looks_like_api_key("  sk_" + "a" * 48 + "  "))
 

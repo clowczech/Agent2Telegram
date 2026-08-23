@@ -413,16 +413,16 @@ class AttachBridge:
 
     @contextmanager
     def _instance_lock(self):
-        cesta = getattr(self, "_offset_file", None)
-        if cesta is None:
+        offset_path = getattr(self, "_offset_file", None)
+        if offset_path is None:
             yield
             return
         try:
-            with single_instance_lock(Path(cesta).parent / "bridge.lock"):
+            with single_instance_lock(Path(offset_path).parent / "bridge.lock"):
                 yield
         except AlreadyRunning:
             raise RuntimeError(
-                f"Another bridge instance is already running over the state at {Path(cesta).parent}. "
+                f"Another bridge instance is already running over the state at {Path(offset_path).parent}. "
                 "Two at once fight over messages — stop the other one, or give each its "
                 "own AGENT2TELEGRAM_STATE."
             ) from None
@@ -652,23 +652,23 @@ class AttachBridge:
         # (gap found 2026-08-02). Content is truncated and never includes attachments' bytes.
         msg = upd.get("message") or upd.get("edited_message") or {}
         if msg.get("voice") or msg.get("audio"):
-            druh = "voice"
+            kind = "voice"
         elif msg.get("photo") or msg.get("document"):
-            druh = "file"
+            kind = "file"
         elif upd.get("message_reaction"):
-            druh = "reaction"
+            kind = "reaction"
         else:
-            druh = "text"
-        nahled = (msg.get("text") or msg.get("caption") or "").replace("\n", " ")[:40]
+            kind = "text"
+        preview = (msg.get("text") or msg.get("caption") or "").replace("\n", " ")[:40]
         # Whether it was a reply to a specific message matters for later diagnosis: the agent
         # gets that context, so the log must show it too (otherwise the two cannot be matched up).
-        odpoved = msg.get("reply_to_message") or {}
-        na_co = (odpoved.get("text") or odpoved.get("caption") or "").replace("\n", " ")[:30]
-        if na_co:
+        replied_to = msg.get("reply_to_message") or {}
+        quoted = (replied_to.get("text") or replied_to.get("caption") or "").replace("\n", " ")[:30]
+        if quoted:
             log.info("IN  id=%s update=%s kind=%s reply_to=%r %r",
-                     record_id, update_id, druh, na_co, nahled)
+                     record_id, update_id, kind, preview, quoted)
         else:
-            log.info("IN  id=%s update=%s kind=%s %r", record_id, update_id, druh, nahled)
+            log.info("IN  id=%s update=%s kind=%s %r", record_id, update_id, kind, preview)
         self._submit_inbound_update(upd, record_id)
         self._mark_update_processed(update_id)
         return next_offset
@@ -751,9 +751,9 @@ class AttachBridge:
         outbox = self._ensure_outbox()
         if outbox is not None:
             chunks = split_message(text) if text else []
-            soubory = list(getattr(self, "_pending_files", []) or [])
+            files = list(getattr(self, "_pending_files", []) or [])
             try:
-                outbox.enqueue(chunks, soubory, key)
+                outbox.enqueue(chunks, files, key)
             except Exception as e:
                 log.error("could not persist the outgoing reply, falling back to the old path: %s", e)
             else:
@@ -795,7 +795,7 @@ class AttachBridge:
                 # the SHARED state directory, and the live bridge — a different process watching
                 # that same queue — delivers it to the real chat. That is not hypothetical: on
                 # 2026-08-23 a test run sent eleven fixture strings ("the real answer", "thanks!")
-                # straight to Petr. A test must never be able to reach a real chat, so the outbox
+                # straight to a real chat. A test must never be able to do that, so the outbox
                 # refuses the default path instead of trusting every test to opt out.
                 log.error("durable outbox refused: test run without an isolated queue "
                           "(set _queue_path or AGENT2TELEGRAM_STATE)")
@@ -832,31 +832,31 @@ class AttachBridge:
                     return
                 outbox.mark_chunk_sent(rec.record_id, index)
             vzdano = False
-            for cesta in rec.pending_files:
+            for file_path in rec.pending_files:
                 try:
-                    self._send_one_file(cesta)
+                    self._send_one_file(file_path)
                 except Exception as e:
                     # Bounded retries: without them one bad attachment (over the size limit,
                     # a deleted file, HTTP 400) would hold the head of the FIFO queue forever
                     # and NO further reply would reach the user (finding F2).
-                    pokusu = outbox.fail(rec.record_id, f"{cesta}: {e}")
+                    attempts = outbox.fail(rec.record_id, f"{file_path}: {e}")
                     log.warning("delivery of attachment %s failed (%d/%d): %s",
-                                cesta, pokusu, OUTBOX_MAX_ATTEMPTS, e)
-                    if pokusu >= OUTBOX_MAX_ATTEMPTS:
+                                file_path, attempts, OUTBOX_MAX_ATTEMPTS, e)
+                    if attempts >= OUTBOX_MAX_ATTEMPTS:
                         # mark_file_sent must NOT be used: it would record that the attachment
                         # arrived when it did not — a silent loss, exactly what this project
                         # removes. An earlier form of this fix did that; caught in the third
                         # review round. The whole record goes to dead-letter: it leaves the queue
                         # (so it does not clog it) but stays traceable, including which parts
                         # did get delivered.
-                        self._ohlas_trvale_odmitnuti(Path(cesta).name, str(e))
-                        outbox.give_up(rec.record_id, f"attachment {cesta}: {e}")
+                        self._report_permanent_refusal(Path(file_path).name, str(e))
+                        outbox.give_up(rec.record_id, f"attachment {file_path}: {e}")
                         log.error("attachment %s gave up after %d attempts → dead-letter",
-                                  cesta, pokusu)
+                                  file_path, attempts)
                         vzdano = True
                         break
                     return
-                outbox.mark_file_sent(rec.record_id, cesta)
+                outbox.mark_file_sent(rec.record_id, file_path)
             if vzdano:
                 continue          # the record is in dead-letter, the queue moves on
             if rec.key and not self._mark_sent(rec.key):
@@ -867,9 +867,9 @@ class AttachBridge:
             # The record id and a text preview are logged ON PURPOSE: on 2026-08-01 the user
             # received one reply twice and the log could not tell whether it was the same
             # message delivered twice or two different ones. Without that, any fix is a guess.
-            nahled = (rec.chunks[0][:40] if rec.chunks else "(files only)").replace("\n", " ")
+            preview = (rec.chunks[0][:40] if rec.chunks else "(files only)").replace("\n", " ")
             log.info("FWD (delivered) id=%s %d parts, %d attachments %r",
-                     rec.record_id, len(rec.chunks), len(rec.files), nahled)
+                     rec.record_id, len(rec.chunks), len(rec.files), preview)
 
         while self._pending_send and self._owner_chat is not None:
             item = self._pending_send[0]
@@ -981,7 +981,7 @@ class AttachBridge:
             except Exception as e:
                 log.warning("cleanup of delivered record %s failed: %s", record_id, e)
 
-    def _inbound_failed(self, record_id: str | None, duvod: str) -> None:
+    def _inbound_failed(self, record_id: str | None, reason: str) -> None:
         """Not delivered → the record stays and is retried. After the attempts are exhausted it
         goes to dead-letter, so the message never vanishes without a trace even in a hopeless case."""
         self._inbound_inflight().discard(record_id)
@@ -989,11 +989,11 @@ class AttachBridge:
         if not record_id or inbox is None:
             return
         try:
-            pokusu = inbox.fail(record_id, duvod)
-            if pokusu >= INBOUND_MAX_ATTEMPTS:
-                inbox.give_up(record_id, f"{duvod} (po {pokusu} pokusech)")
+            attempts = inbox.fail(record_id, reason)
+            if attempts >= INBOUND_MAX_ATTEMPTS:
+                inbox.give_up(record_id, f"{reason} (after {attempts} attempts)")
                 log.error("update %s could not be delivered even on attempt %d → dead-letter",
-                          record_id, pokusu)
+                          record_id, attempts)
         except Exception as e:
             log.warning("marking undelivered record %s failed: %s", record_id, e)
 
@@ -1066,9 +1066,9 @@ class AttachBridge:
                 # is the lesser evil; the log line in _finish_turn keeps it visible.
                 # Only when no turn was running: a reaction landing mid-turn must not disarm the
                 # backstop for the real question underneath it.
-                bezi_turn = self._turn_active.is_set()
+                turn_running = self._turn_active.is_set()
                 self._begin_turn()
-                if not bezi_turn:
+                if not turn_running:
                     self._turn_is_reaction = True
                 return self._inject(
                     f"{emojis} reacted {emojis} to your message #{mr.get('message_id')} "
@@ -1222,15 +1222,15 @@ class AttachBridge:
         """
         self._turn_active.set()
         self._last_activity = time.monotonic()   # keep typing lit from the very start
-        posledni_chyba: Exception | None = None
-        for pokus in range(1, INJECT_ATTEMPTS + 1):
+        last_error: Exception | None = None
+        for attempt in range(1, INJECT_ATTEMPTS + 1):
             try:
                 self._session.inject(text)
-                if pokus > 1:
-                    log.info("inject succeeded on attempt %d", pokus)
+                if attempt > 1:
+                    log.info("inject succeeded on attempt %d", attempt)
                 return True
             except SessionError as e:
-                posledni_chyba = e
+                last_error = e
                 if "refusing to inject" in str(e):
                     # The pane isn't running the expected agent — retrying won't help, only delay.
                     log.error("inject failed: %s", e)
@@ -1238,33 +1238,33 @@ class AttachBridge:
                     self._notify_unsafe_pane(str(e))
                     return False
             except Exception as e:
-                posledni_chyba = e
-            if pokus < INJECT_ATTEMPTS:
+                last_error = e
+            if attempt < INJECT_ATTEMPTS:
                 self._stop.wait(INJECT_RETRY_WAIT)
-        log.error("inject failed po %d pokusech: %s", INJECT_ATTEMPTS, posledni_chyba)
+        log.error("inject failed after %d attempts: %s", INJECT_ATTEMPTS, last_error)
         self._turn_active.clear()
-        self._notify_inject_failed(text, str(posledni_chyba))
+        self._notify_inject_failed(text, str(last_error))
         return False
 
     def _notify_inject_failed(self, text: str, reason: str) -> None:
         """Tell the owner their message did not get through — better twice than never."""
         if not self._owner_chat:
             return
-        nahled = text.strip().replace("\n", " ")
-        if len(nahled) > 80:
-            nahled = nahled[:80] + "…"
+        preview = text.strip().replace("\n", " ")
+        if len(preview) > 80:
+            preview = preview[:80] + "…"
         try:
             self.tg.send_message(
                 self._owner_chat,
                 "⚠️ Couldn't deliver your message to the agent session — the write to tmux "
                 f"failed after {INJECT_ATTEMPTS} attempts.\n\n"
-                f"Message: {nahled}\n{reason}\n\n"
+                f"Message: {preview}\n{reason}\n\n"
                 "The agent may be frozen. Check the tmux pane, then send it again.",
             )
             # Log it: without this the daily report sees "N injects failed" but cannot tell
             # whether the user was ever told. That is the exact blind spot delivery logging
             # was added to close (2026-08-04).
-            log.info("inject failure reported to the owner %r", nahled[:40])
+            log.info("inject failure reported to the owner %r", preview[:40])
         except Exception as e:
             log.warning("inject-failure notification failed: %s", e)
 
@@ -1664,7 +1664,7 @@ class AttachBridge:
             return
         # No live turn → no bubble. The bubble is technical progress and is deleted at turn end;
         # one created outside a turn has nothing to delete it and hangs in the chat until the NEXT
-        # turn happens to finish. Petr saw exactly that: "Editing MEMORY.md" stuck for eight
+        # turn happens to finish. Seen in practice: "Editing MEMORY.md" stuck for eight
         # minutes after a bridge restart drained the transcript with no turn running (2026-08-02).
         if not self._turn_active.is_set():
             return
@@ -1830,12 +1830,12 @@ class AttachBridge:
         # Instead of guessing, it is retried a BOUNDED number of times and then given up; the
         # outbox keeps the counter.
 
-    def _ohlas_trvale_odmitnuti(self, jmeno: str, duvod: str) -> None:
+    def _report_permanent_refusal(self, name: str, reason: str) -> None:
         """Report an attachment not worth retrying and treat it as done. A silent drop would be
         worse than a visible error — and a clogged queue worse still."""
-        log.warning("refusing to send attachment %s: %s", jmeno, duvod)
+        log.warning("refusing to send attachment %s: %s", name, reason)
         try:
-            self.tg.send_message(self._owner_chat, f"⚠️ Couldn't send {jmeno}: {duvod}")
+            self.tg.send_message(self._owner_chat, f"⚠️ Couldn't send {name}: {reason}")
         except Exception as e:
             log.warning("could not report the rejected attachment: %s", e)
 

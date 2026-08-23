@@ -205,10 +205,10 @@ class AdversarialDispatchTests(BridgeTestBase):
             self.assertEqual(client.sent, [])
 
     def test_transient_network_outage_warns_errors_once_then_recovers(self):
-        """Síťový/DNS výpadek getUpdates (i zabalený v TelegramError, jak ho reálně vyhazuje
-        telegram.py po vyčerpání retmů) se loguje jako WARNING; ERROR jen JEDNOU při delším
-        výpadku (≥10 chyb v řadě), aby monitoring nealertoval na sebe-zotavující se VPN-DNS
-        blip; po obnově se loguje INFO a čítač se resetuje."""
+        """A network/DNS outage on getUpdates — including one wrapped in TelegramError, which is
+        what telegram.py actually raises once retries are exhausted — logs as WARNING. ERROR is
+        logged exactly ONCE per longer outage (>=10 consecutive failures), so monitoring does not
+        alert on a self-healing VPN/DNS blip. Recovery logs INFO and resets the counter."""
         import logging as _logging
         import urllib.error as _uerr
         from unittest.mock import patch as _patch
@@ -224,7 +224,7 @@ class AdversarialDispatchTests(BridgeTestBase):
             def get_updates(self, offset, *, timeout=50):
                 self.calls += 1
                 if self.calls <= self.fail_times:
-                    # přesně jak to vyhazuje telegram.py: TelegramError s __cause__ = síťová chyba
+                    # exactly as telegram.py raises it: TelegramError with __cause__ = network error
                     raise _TgErr("getUpdates: <urlopen error [Errno 8] nodename nor servname>") \
                         from _uerr.URLError("[Errno 8] nodename nor servname provided, or not known")
                 if self.stop_event is not None:
@@ -232,7 +232,7 @@ class AdversarialDispatchTests(BridgeTestBase):
                 return []
 
         with tempfile.TemporaryDirectory() as d:
-            client = _FlakyClient(fail_times=13)   # delší výpadek než threshold 10, pak obnova
+            client = _FlakyClient(fail_times=13)   # longer than the threshold of 10, then recovery
             cfg = Config(agent="claude-code", token="1:2", allowed_user_ids=[7], workdir=d)
             bridge = Bridge(cfg, client=client)
             bridge.adapter = _FakeAdapter()
@@ -245,10 +245,10 @@ class AdversarialDispatchTests(BridgeTestBase):
             warns = [r for r in gu if r.levelno == _logging.WARNING]
             errors = [r for r in gu if r.levelno == _logging.ERROR]
             infos = [r for r in gu if r.levelno == _logging.INFO]
-            self.assertGreaterEqual(len(warns), 9)          # chyby 1–9 = WARNING
-            self.assertEqual(len(errors), 1)                # ERROR přesně jednou za výpadek
-            self.assertGreaterEqual(len(infos), 1)          # obnova = INFO
-            # síťová chyba se NIKDY neloguje starým "getUpdates failed" (= ne-síťová větev)
+            self.assertGreaterEqual(len(warns), 9)          # failures 1-9 = WARNING
+            self.assertEqual(len(errors), 1)                # ERROR exactly once per outage
+            self.assertGreaterEqual(len(infos), 1)          # recovery = INFO
+            # a network error must NEVER log the old "getUpdates failed" (the non-network branch)
             self.assertFalse(any("getUpdates failed" in r.getMessage() for r in gu))
 
 

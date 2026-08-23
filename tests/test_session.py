@@ -16,7 +16,7 @@ class SanitizeForTmuxTests(unittest.TestCase):
         self.assertEqual(sanitize_for_tmux(""), "")
 
     def test_unicode_is_preserved(self):
-        text = "Žluťoučký kůň ✅ Привет こんにちは 🚀"
+        text = "Grüße ✅ Привет こんにちは 🚀"
         self.assertEqual(sanitize_for_tmux(text), text)
 
     def test_control_characters_are_stripped_except_newline_and_tab(self):
@@ -158,8 +158,8 @@ class TmuxSessionSendKeysTests(unittest.TestCase):
             (
                 101,
                 100,
-                "/Users/asistent/.local/bin/claude",
-                "/Users/asistent/.local/bin/claude --resume abc123 --dangerously-skip-permissions",
+                "/Users/you/.local/bin/claude",
+                "/Users/you/.local/bin/claude --resume abc123 --dangerously-skip-permissions",
             ),
         ]
 

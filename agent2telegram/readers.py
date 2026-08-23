@@ -181,7 +181,7 @@ class CodexReader:
         # ``response_item/message`` (role=assistant). Newer Codex (>= 0.149) logs ONLY the second
         # form. We therefore read both and remember what we already emitted, so old versions do not
         # double-send and new versions do not go silent. Silence is the dangerous failure here: the
-        # bridge keeps showing "typing" while the reply never arrives (Jiří Přecechtěl, 2026-08-23).
+        # bridge keeps showing "typing" while the reply never arrives (reported 2026-08-23).
         # A bounded window, not a session-wide set: the two records of one reply sit next to each
         # other in the log, while an agent legitimately repeating the same sentence later in the
         # session must still be delivered.

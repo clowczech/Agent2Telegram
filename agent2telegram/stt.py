@@ -56,12 +56,12 @@ def _error_detail(err: urllib.error.HTTPError) -> str:
         return _redact(" ".join(raw.split()))[:300]
     detail = payload.get("detail") if isinstance(payload, dict) else None
     if isinstance(detail, dict):
-        zprava = detail.get("message") or detail.get("status") or json.dumps(detail)
+        message = detail.get("message") or detail.get("status") or json.dumps(detail)
     elif isinstance(detail, str):
-        zprava = detail
+        message = detail
     else:
-        zprava = json.dumps(payload)
-    return _redact(" ".join(str(zprava).split()))[:300]
+        message = json.dumps(payload)
+    return _redact(" ".join(str(message).split()))[:300]
 
 
 def _describe_error(err: BaseException) -> str:

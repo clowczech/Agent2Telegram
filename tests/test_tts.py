@@ -10,26 +10,26 @@ from agent2telegram.tts import TTSError, sanitize_for_speech, synthesize
 
 class SanitiseSafetyNetTests(unittest.TestCase):
     def test_leftover_markdown_removed(self):
-        out = sanitize_for_speech("**tučně** a ## nadpis a | tabulka |")
+        out = sanitize_for_speech("**bold** and ## heading and | table |")
         for junk in ("**", "#", "|"):
             self.assertNotIn(junk, out)
-        self.assertIn("tučně", out)
+        self.assertIn("bold", out)
 
     def test_inline_code_keeps_text_without_backticks(self):
-        out = sanitize_for_speech("spusť `příkaz` teď")
+        out = sanitize_for_speech("run `command` now")
         self.assertNotIn("`", out)
-        self.assertIn("příkaz", out)   # safety net keeps words; the AGENT decides what to say
+        self.assertIn("command", out)  # safety net keeps words; the AGENT decides what to say
 
     def test_blank_lines_and_bullets_collapse(self):
-        out = sanitize_for_speech("první\n\n- druhý\n- třetí")
+        out = sanitize_for_speech("first\n\n- second\n- third")
         self.assertNotIn("\n\n", out)
         self.assertNotIn("- ", out)
-        for w in ("první", "druhý", "třetí"):
+        for w in ("first", "second", "third"):
             self.assertIn(w, out)
 
     def test_does_not_rewrite_numbers(self):
         # Deliberately NOT a smart rewrite — that is the agent's job now.
-        out = sanitize_for_speech("190 testů")
+        out = sanitize_for_speech("190 tests")
         self.assertIn("190", out)
 
 

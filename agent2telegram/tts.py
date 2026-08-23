@@ -26,9 +26,9 @@ import urllib.request
 log = logging.getLogger("agent2telegram.tts")
 
 TTS_URL = "https://api.elevenlabs.io/v1/text-to-speech/{voice_id}"
-#: Eleven v3 (out of alpha 2026-08; Petr 2026-08-21: generovat vše přes v3). Multilingual → voice
-#: follows the CONVERSATION's language from the text itself. v3 = přesnější čísla + stabilnější
-#: generace než v2 (error rate 15,3 % → 4,9 %). STT/Scribe (přepis) tím NENÍ dotčen – opačný proces.
+#: Eleven v3 (out of alpha 2026-08). Multilingual, so the voice follows the CONVERSATION's
+#: language from the text itself. Against v2 it reads numbers more accurately and generates more
+#: steadily (error rate 15.3% -> 4.9%). Speech-to-text (Scribe) is a separate path, unaffected.
 DEFAULT_MODEL_ID = "eleven_v3"
 #: ElevenLabs returns mp3 here; the bridge converts to OGG/OPUS (ffmpeg) before sendVoice.
 DEFAULT_OUTPUT_FORMAT = "mp3_44100_128"

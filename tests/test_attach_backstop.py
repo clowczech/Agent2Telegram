@@ -200,7 +200,7 @@ class ReactionTurnBackstopTests(unittest.TestCase):
                              "an explicit reply to a reaction must still go out, exactly once")
 
     def test_reaction_prompt_asks_for_a_short_answer(self):
-        """Petr 2026-08-02: a heart must ALWAYS get a reply, just a very short one."""
+        """A heart must ALWAYS get a reply, just a very short one."""
         with tempfile.TemporaryDirectory() as d:
             b = _bridge(d)
             b._turn_active.clear()
@@ -235,7 +235,7 @@ class ReactionTurnBackstopTests(unittest.TestCase):
 
 class StatusBubbleLifetimeTests(unittest.TestCase):
     """A technical bubble is deleted at turn end. One created with NO turn running has nothing
-    to delete it and hangs in the chat — Petr saw "Editing MEMORY.md" stuck for eight minutes
+    to delete it and hangs in the chat — "Editing MEMORY.md" was seen stuck for eight minutes
     after a bridge restart drained the transcript outside a turn (2026-08-02)."""
 
     def test_no_bubble_is_created_outside_a_turn(self):
@@ -261,7 +261,7 @@ class StatusBubbleLifetimeTests(unittest.TestCase):
 class BackstopDedupTests(unittest.TestCase):
     """The backstop must never re-send a message the normal path already delivered. It reads the
     LAST assistant text in the transcript, which — when a turn ends before its own answer lands —
-    is the PREVIOUS turn's answer. Petr got that duplicate on the Genius bridge (2026-08-02:
+    is the PREVIOUS turn's answer. That duplicate was observed on a live bridge (2026-08-02:
     the 15:51 reply arrived again at 16:04, right after a voice note)."""
 
     def setUp(self):

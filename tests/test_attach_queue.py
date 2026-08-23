@@ -226,8 +226,9 @@ class AttachInboundTests(unittest.TestCase):
                 release_stt.set()
                 _wait_inbound(b)
 
-                # Přepis je od 2026-08-01 označený jako strojový, ať ho agent nebere doslova
-                # (Petrova hlasovka se přepsala do čínštiny). Kontrolujeme text i značku.
+                # Since 2026-08-01 the transcript is labelled as machine-made so the agent does
+                # not take it literally (a voice note once came back transcribed as Chinese).
+                # Both the text and the label are checked.
                 self.assertEqual(len(b._session.injected), 1)
                 self.assertIn("voice text", b._session.injected[0])
                 self.assertIn("voice transcript", b._session.injected[0])

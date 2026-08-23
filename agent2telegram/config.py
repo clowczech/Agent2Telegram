@@ -42,7 +42,7 @@ class Config:
     poll_timeout: int = 50              # long-poll timeout for getUpdates
     elevenlabs_api_key: str = ""        # optional: enables voice-message transcription (STT)
     tts_voice_id: str = "XB0fDUnXU5powFXDhCwa"   # ElevenLabs voice for /voice replies (Charlotte)
-    tts_model_id: str = "eleven_v3"  # Eleven v3 (Petr 2026-08-21): přesnější čísla, stabilnější; multilingual
+    tts_model_id: str = "eleven_v3"  # v3: better numeral accuracy, steadier generation, multilingual
     # ---- persistent "attach" mode (drive an existing live agent session) ----
     mode: str = "oneshot"               # "oneshot" | "attach"
     tmux_session: str = ""              # name of the existing tmux session to drive

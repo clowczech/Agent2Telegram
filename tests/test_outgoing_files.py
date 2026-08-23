@@ -45,15 +45,15 @@ def bind(bridge: FakeBridge):
 
 
 class OutgoingFilesTest(unittest.TestCase):
-    def test_marker_se_vyjme_z_textu(self) -> None:
+    def test_marker_is_stripped_from_the_text(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             b = bind(FakeBridge(cfg_with_outbox(Path(tmp))))
             text, files = b._extract_files(
-                "Tady je náhled.\n[tg-file] /tmp/a.mp4\nA ještě zvuk.\n[tg-file] '/tmp/b.mp3'")
-            self.assertEqual(text, "Tady je náhled.\nA ještě zvuk.")
+                "Here is the preview.\n[tg-file] /tmp/a.mp4\nAnd the audio too.\n[tg-file] '/tmp/b.mp3'")
+            self.assertEqual(text, "Here is the preview.\nAnd the audio too.")
             self.assertEqual(files, ["/tmp/a.mp4", "/tmp/b.mp3"])
 
-    def test_soubor_v_outboxu_projde(self) -> None:
+    def test_a_file_inside_the_outbox_is_allowed(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             out = Path(tmp) / "outbox"
             out.mkdir()
@@ -75,9 +75,9 @@ class OutgoingFilesTest(unittest.TestCase):
             self.assertIsNone(resolved)
             self.assertIn("outside", reason)
 
-    def test_symlink_z_outboxu_ven_se_odmitne(self) -> None:
-        """Nejzrádnější případ: odkaz uvnitř povolené složky mířící na tajný soubor.
-        Proto se cesta rozbaluje (resolve) PŘED kontrolou, ne po ní."""
+    def test_a_symlink_leading_out_of_the_outbox_is_refused(self) -> None:
+        """The nastiest case: a link inside the allowed directory pointing at a secret file.
+        That is why the path is resolved BEFORE the check, not after it."""
         with tempfile.TemporaryDirectory() as tmp:
             out = Path(tmp) / "outbox"
             out.mkdir()
@@ -87,21 +87,21 @@ class OutgoingFilesTest(unittest.TestCase):
             os.symlink(secret, link)
             b = bind(FakeBridge(cfg_with_outbox(out)))
             resolved, reason = b._safe_outbox_path(str(link))
-            self.assertIsNone(resolved, "symlink ven z outboxu musí být odmítnutý")
+            self.assertIsNone(resolved, "a symlink out of the outbox must be refused")
             self.assertIn("outside", reason)
 
-    def test_odmitnuti_se_ohlasi_do_chatu(self) -> None:
-        """Tiše zahozená příloha by byla horší než viditelná chyba."""
+    def test_a_refusal_is_reported_in_the_chat(self) -> None:
+        """A silently dropped attachment would be worse than a visible error."""
         with tempfile.TemporaryDirectory() as tmp:
             out = Path(tmp) / "outbox"
             out.mkdir()
             b = bind(FakeBridge(cfg_with_outbox(out)))
-            b._send_files([str(Path(tmp) / "nekde-jinde.mp4")])
-            self.assertTrue(b.sent_text, "odmítnutí se musí objevit v chatu")
+            b._send_files([str(Path(tmp) / "somewhere-else.mp4")])
+            self.assertTrue(b.sent_text, "the refusal must show up in the chat")
             self.assertIn("Couldn't send", b.sent_text[0])
             b.tg.send_file.assert_not_called()
 
-    def test_prazdny_soubor_se_odmitne(self) -> None:
+    def test_an_empty_file_is_refused(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             out = Path(tmp) / "outbox"
             out.mkdir()
@@ -119,10 +119,10 @@ class OutgoingFilesTest(unittest.TestCase):
         self.assertEqual(TelegramClient.kind_for("a.png"), ("sendPhoto", "photo"))
         self.assertEqual(TelegramClient.kind_for("a.zip"), ("sendDocument", "document"))
 
-    def test_prilis_velky_soubor_selze_hned(self) -> None:
-        """Radši jasná chyba než pět minut uploadu a pak 413."""
+    def test_an_oversized_file_fails_immediately(self) -> None:
+        """A clear error beats five minutes of uploading followed by a 413."""
         with tempfile.TemporaryDirectory() as tmp:
-            f = Path(tmp) / "velky.mp4"
+            f = Path(tmp) / "big.mp4"
             f.write_bytes(b"x" * 16)
             c = TelegramClient("1:x", opener=mock.Mock())
             with mock.patch.object(os.path, "getsize", return_value=TelegramClient.MAX_UPLOAD + 1), \
@@ -130,16 +130,16 @@ class OutgoingFilesTest(unittest.TestCase):
                 c.send_file(1, str(f))
             self.assertIn("at most", str(cm.exception))
 
-    def test_vychozi_outbox_je_vzdy_povoleny(self) -> None:
+    def test_the_default_outbox_is_always_allowed(self) -> None:
         c = Config(token="1:x", agent="claude-code")
         self.assertIn(c.path_outbox(), c.allowed_outbox_dirs())
 
 
 class NotifyFilesTest(unittest.TestCase):
-    """`notify --file` je cesta pro zprávy z pozadí a cronu. Musí mít STEJNOU
-    hranici jako marker v chatu – běh na pozadí není důvěryhodnější než agent."""
+    """`notify --file` is the path used by background jobs and cron. It must enforce the SAME
+    boundary as the in-chat marker — running in the background is not more trustworthy."""
 
-    def test_notify_odmitne_soubor_mimo_outbox(self) -> None:
+    def test_notify_refuses_a_file_outside_the_outbox(self) -> None:
         from agent2telegram import __main__ as m
         with tempfile.TemporaryDirectory() as tmp:
             out = Path(tmp) / "outbox"
@@ -149,20 +149,20 @@ class NotifyFilesTest(unittest.TestCase):
             cfg = cfg_with_outbox(out)
             cfg.allowed_user_ids = [1]
             client = mock.Mock()
-            args = mock.Mock(message="ahoj", config=None, file=[str(secret)])
+            args = mock.Mock(message="hi", config=None, file=[str(secret)])
             with mock.patch("agent2telegram.config.load", return_value=cfg), \
                  mock.patch("agent2telegram.telegram.TelegramClient", return_value=client):
                 rc = m._cmd_notify(args)
-            self.assertEqual(rc, 1, "odmítnutí musí vrátit nenulový kód")
+            self.assertEqual(rc, 1, "a refusal must return a non-zero exit code")
             client.send_file.assert_not_called()
-            client.send_message.assert_called_once()      # text projde, soubor ne
+            client.send_message.assert_called_once()      # the text goes through, the file does not
 
-    def test_notify_posle_soubor_z_outboxu(self) -> None:
+    def test_notify_sends_a_file_from_the_outbox(self) -> None:
         from agent2telegram import __main__ as m
         with tempfile.TemporaryDirectory() as tmp:
             out = Path(tmp) / "outbox"
             out.mkdir()
-            f = out / "vlna.png"
+            f = out / "waveform.png"
             f.write_bytes(b"x" * 50)
             cfg = cfg_with_outbox(out)
             cfg.allowed_user_ids = [1]
@@ -173,7 +173,7 @@ class NotifyFilesTest(unittest.TestCase):
                 rc = m._cmd_notify(args)
             self.assertEqual(rc, 0)
             client.send_file.assert_called_once()
-            client.send_message.assert_not_called()       # bez textu se nic neposílá
+            client.send_message.assert_not_called()       # with no text, no message is sent
 
 
 if __name__ == "__main__":
