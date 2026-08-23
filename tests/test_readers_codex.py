@@ -74,3 +74,31 @@ class CodexReaderFormatTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CodexReaderUserTurnTests(unittest.TestCase):
+    """Rozpoznání Telegram promptu. Bez toho bridge odpověď zahodí, i když ji přečte."""
+
+    def _kinds(self, reader, records):
+        return [ev.kind for rec in records for ev in reader.parse(rec)]
+
+    def test_new_format_user_prompt_marks_turn(self):
+        rec = {"type": "response_item", "payload": {
+            "type": "message", "role": "user",
+            "content": [{"type": "input_text", "text": "[TG] reply with PONG"}]}}
+        self.assertEqual(CodexReader().user_text(rec), "[TG] reply with PONG")
+
+    def test_old_format_user_prompt_is_not_double_emitted(self):
+        recs = [
+            {"type": "response_item", "payload": {
+                "type": "message", "role": "user",
+                "content": [{"type": "input_text", "text": "[TG] ahoj"}]}},
+            {"type": "event_msg", "payload": {"type": "user_message", "message": "[TG] ahoj"}},
+        ]
+        self.assertEqual(self._kinds(CodexReader(), recs), ["user"])
+
+    def test_assistant_content_blocks_of_other_type_are_ignored(self):
+        rec = {"type": "response_item", "payload": {
+            "type": "message", "role": "assistant",
+            "content": [{"type": "input_text", "text": "tohle není odpověď"}]}}
+        self.assertEqual(list(CodexReader().parse(rec)), [])

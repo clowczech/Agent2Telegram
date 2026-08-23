@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections import deque
 import os
 import urllib.parse
 from dataclasses import dataclass
@@ -151,16 +152,19 @@ def _codex_tool_summary(payload: dict) -> str:
     return "🛠️ tool"
 
 
-def _codex_output_text(payload: dict) -> str:
-    """Join the ``output_text`` parts of a Codex ``response_item/message`` payload."""
+def _codex_message_text(payload: dict, block_type: str) -> str:
+    """Join the ``block_type`` parts of a Codex ``response_item/message`` payload.
+
+    Codex >= 0.149 records user prompts (``input_text``) and assistant replies (``output_text``)
+    only in this form; the legacy ``event_msg`` records are gone.
+    """
     parts = payload.get("content")
     if not isinstance(parts, list):
         return ""
-    out = []
-    for part in parts:
-        if isinstance(part, dict) and part.get("type") in ("output_text", "text"):
-            out.append(part.get("text") or "")
-    return "".join(out).strip()
+    return "".join(
+        part.get("text") or "" for part in parts
+        if isinstance(part, dict) and part.get("type") == block_type
+    ).strip()
 
 
 class CodexReader:
@@ -178,12 +182,19 @@ class CodexReader:
         # form. We therefore read both and remember what we already emitted, so old versions do not
         # double-send and new versions do not go silent. Silence is the dangerous failure here: the
         # bridge keeps showing "typing" while the reply never arrives (Jiří Přecechtěl, 2026-08-23).
-        self._emitted_msgs: set[str] = set()
+        # A bounded window, not a session-wide set: the two records of one reply sit next to each
+        # other in the log, while an agent legitimately repeating the same sentence later in the
+        # session must still be delivered.
+        self._recent_msgs: deque = deque(maxlen=8)
+        self._recent_users: deque = deque(maxlen=8)
 
     def user_text(self, rec: dict) -> str | None:
         p = rec.get("payload") if isinstance(rec.get("payload"), dict) else {}
         if rec.get("type") == "event_msg" and p.get("type") == "user_message":
             return p.get("message", "")
+        if (rec.get("type") == "response_item" and p.get("type") == "message"
+                and p.get("role") == "user"):
+            return _codex_message_text(p, "input_text") or None
         return None
 
     def parse(self, rec: dict):
@@ -195,21 +206,31 @@ class CodexReader:
         elif t == "event_msg" and pt == "user_message":
             msg = p.get("message", "")
             if msg.strip():
+                h = _hash(msg.strip())
+                if h in self._recent_users:
+                    return
+                self._recent_users.append(h)
+                yield Ev("user", text=msg)
+        elif t == "response_item" and pt == "message" and p.get("role") == "user":
+            msg = _codex_message_text(p, "input_text")
+            if msg and _hash(msg) not in self._recent_users:
+                self._recent_users.append(_hash(msg))
                 yield Ev("user", text=msg)
         elif t == "event_msg" and pt == "agent_message":
             msg = (p.get("message") or "").strip()
             if msg:
                 ts = rec.get("timestamp", "")
-                self._emitted_msgs.add(_hash(msg))
+                self._recent_msgs.append(_hash(msg))
                 yield Ev("text", text=msg, key=f"{ts}:{_hash(msg)}",
                          final=(p.get("phase") == "final_answer"))
         elif t == "response_item" and pt == "message" and p.get("role") == "assistant":
             # Fallback for Codex >= 0.149, which no longer emits event_msg/agent_message.
-            msg = _codex_output_text(p)
-            if msg and _hash(msg) not in self._emitted_msgs:
+            msg = _codex_message_text(p, "output_text")
+            if msg and _hash(msg) not in self._recent_msgs:
                 ts = rec.get("timestamp", "")
-                self._emitted_msgs.add(_hash(msg))
-                yield Ev("text", text=msg, key=f"{ts}:{_hash(msg)}", final=True)
+                self._recent_msgs.append(_hash(msg))
+                yield Ev("text", text=msg, key=f"{ts}:{_hash(msg)}",
+                         final=(p.get("phase") == "final_answer" or p.get("phase") is None))
         elif t == "response_item" and pt in ("function_call", "custom_tool_call", "web_search_call"):
             if pt == "web_search_call":
                 action = p.get("action") if isinstance(p.get("action"), dict) else {}
