@@ -14,7 +14,6 @@ Background: messages were disappearing without a trace. A monitor was killing th
 times a day, and finding B says every one of those kills could have eaten an arriving message
 for good.
 """
-import json
 import os
 import tempfile
 import threading

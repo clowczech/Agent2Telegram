@@ -5,7 +5,9 @@ not text: the preflight names every missing dependency with an install command, 
 setup launch falls back cleanly when there is no usable /dev/tty. Cross-platform on purpose.
 """
 import os
+import shutil
 import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -21,23 +23,48 @@ class InstallSyntaxTests(unittest.TestCase):
 
 class PreflightTests(unittest.TestCase):
     def test_missing_dependency_reported_up_front_with_install_hint(self):
-        """Run install.sh with a PATH that lacks tmux (and, on some hosts, python3), from
-        inside the repo so git isn't required. The preflight must stop BEFORE doing any
-        install work and name the missing dependency plus how to install it — so a webinar
-        attendee installs everything in one go instead of one failure at a time."""
-        r = subprocess.run(
-            ["bash", str(INSTALL)],
-            cwd=str(REPO),
-            env={"PATH": "/usr/bin:/bin", "HOME": os.environ.get("HOME", "/tmp")},
-            stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=30,
-        )
-        out = (r.stdout + r.stderr).lower()
-        self.assertNotEqual(r.returncode, 0, "preflight should stop the installer")
-        self.assertIn("tmux", out, "the missing tmux must be named")
-        self.assertTrue(
-            any(w in out for w in ("install", "apt", "dnf", "brew")),
-            "the error must tell the user how to install it",
-        )
+        """Run install.sh with a PATH that provably lacks tmux, from inside the repo so git
+        isn't required. The preflight must stop BEFORE doing any install work and name the
+        missing dependency plus how to install it — so someone new installs everything in one
+        go instead of one failure at a time.
+
+        The PATH is built here rather than borrowed from the host: an earlier version used
+        `/usr/bin:/bin`, which silently passed on CI runners that ship tmux in /usr/bin. The
+        test then asserted nothing at all.
+        """
+        with tempfile.TemporaryDirectory() as fake_bin:
+            # Mirror every executable on the current PATH except tmux, so the installer has all
+            # the ordinary tools it expects and is missing exactly the one thing under test.
+            # Listing the tools by hand was fragile — it broke the moment install.sh reached for
+            # one that had not been listed.
+            for d in os.environ.get("PATH", "").split(os.pathsep):
+                if not os.path.isdir(d):
+                    continue
+                for name in os.listdir(d):
+                    if name == "tmux" or os.path.exists(os.path.join(fake_bin, name)):
+                        continue
+                    try:
+                        os.symlink(os.path.join(d, name), os.path.join(fake_bin, name))
+                    except OSError:
+                        pass
+            self.assertIsNone(shutil.which("tmux", path=fake_bin),
+                              "the point of this test is a PATH without tmux")
+            self.assertIsNotNone(shutil.which("bash", path=fake_bin),
+                                 "the installer needs bash — the mirrored PATH is incomplete")
+
+            r = subprocess.run(
+                ["bash", str(INSTALL)],
+                cwd=str(REPO),
+                env={"PATH": fake_bin, "HOME": os.environ.get("HOME", "/tmp")},
+                stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=30,
+            )
+            out = (r.stdout + r.stderr).lower()
+            self.assertNotEqual(r.returncode, 0, "preflight should stop the installer")
+            self.assertIn("tmux", out, "the missing tmux must be named")
+            self.assertTrue(
+                any(w in out for w in ("install", "apt", "dnf", "brew")),
+                "the error must tell the user how to install it",
+            )
 
 
 class TtyGuardTests(unittest.TestCase):

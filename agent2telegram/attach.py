@@ -23,6 +23,7 @@ import logging
 import queue
 import shutil
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -184,6 +185,20 @@ def _expected_agent_commands(cfg: Config) -> list[str]:
         )
     return out
 
+
+
+def _in_test_run() -> bool:
+    """True when this process is a test run, whatever runner started it.
+
+    Checking only ``PYTEST_CURRENT_TEST`` was not enough: the project's own CI runs
+    ``python -m unittest discover``, where that variable does not exist — so the guard this
+    backs (see ``_ensure_outbox``) silently did not apply, in exactly the environment where an
+    unfamiliar contributor runs the suite for the first time. The production bridge imports
+    neither runner, so their presence in ``sys.modules`` is a reliable signal.
+    """
+    return ("PYTEST_CURRENT_TEST" in os.environ
+            or "pytest" in sys.modules
+            or "unittest" in sys.modules)
 
 class AttachBridge:
     _turn_end_backstop_enabled = True
@@ -473,7 +488,6 @@ class AttachBridge:
         pos = start
         last_user_end = None
         from_tg = self._turn_from_tg
-        last_key = ""
         for raw in tail.split(b"\n"):
             line_end = pos + len(raw) + 1       # +1 for the newline separator
             pos = line_end
@@ -795,8 +809,7 @@ class AttachBridge:
         outbox = getattr(self, "_outbox", None)
         if outbox is None:
             queue_path = getattr(self, "_queue_path", None)
-            if (queue_path is None and "PYTEST_CURRENT_TEST" in os.environ
-                    and not os.environ.get("AGENT2TELEGRAM_STATE")):
+            if queue_path is None and _in_test_run() and not os.environ.get("AGENT2TELEGRAM_STATE"):
                 # HARD STOP. A test that forgets to isolate its queue would otherwise enqueue into
                 # the SHARED state directory, and the live bridge — a different process watching
                 # that same queue — delivers it to the real chat. That is not hypothetical: on

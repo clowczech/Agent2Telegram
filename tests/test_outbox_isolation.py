@@ -25,9 +25,22 @@ class _FakeBridge:
 
 class OutboxIsolationTests(unittest.TestCase):
     def test_test_run_without_isolated_queue_gets_no_outbox(self):
-        self.assertIn("PYTEST_CURRENT_TEST", os.environ, "this test only makes sense under pytest")
+        self.assertTrue(attach._in_test_run(), "a test run must recognise itself")
         self.assertIsNone(_FakeBridge()._ensure_outbox(),
                           "a test without an isolated queue reached the real outbox")
+
+    def test_the_guard_holds_under_every_runner_not_just_pytest(self):
+        """The project's CI runs `python -m unittest discover`, where PYTEST_CURRENT_TEST does
+        not exist. A guard that only works under pytest is absent exactly where an unfamiliar
+        contributor first runs the suite."""
+        saved = os.environ.pop("PYTEST_CURRENT_TEST", None)
+        try:
+            self.assertTrue(attach._in_test_run(),
+                            "without PYTEST_CURRENT_TEST the run is no longer recognised as a test")
+            self.assertIsNone(_FakeBridge()._ensure_outbox())
+        finally:
+            if saved is not None:
+                os.environ["PYTEST_CURRENT_TEST"] = saved
 
     def test_isolated_queue_path_still_works(self):
         import tempfile

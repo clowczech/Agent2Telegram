@@ -7,6 +7,8 @@ together with the plumbing (marker extraction, method per file type).
 """
 from __future__ import annotations
 
+import contextlib
+import io
 import os
 import tempfile
 import unittest
@@ -152,7 +154,8 @@ class NotifyFilesTest(unittest.TestCase):
             args = mock.Mock(message="hi", config=None, file=[str(secret)])
             with mock.patch("agent2telegram.config.load", return_value=cfg), \
                  mock.patch("agent2telegram.telegram.TelegramClient", return_value=client):
-                rc = m._cmd_notify(args)
+                with contextlib.redirect_stdout(io.StringIO()):
+                    rc = m._cmd_notify(args)
             self.assertEqual(rc, 1, "a refusal must return a non-zero exit code")
             client.send_file.assert_not_called()
             client.send_message.assert_called_once()      # the text goes through, the file does not
@@ -170,7 +173,8 @@ class NotifyFilesTest(unittest.TestCase):
             args = mock.Mock(message=None, config=None, file=[str(f)])
             with mock.patch("agent2telegram.config.load", return_value=cfg), \
                  mock.patch("agent2telegram.telegram.TelegramClient", return_value=client):
-                rc = m._cmd_notify(args)
+                with contextlib.redirect_stdout(io.StringIO()):
+                    rc = m._cmd_notify(args)
             self.assertEqual(rc, 0)
             client.send_file.assert_called_once()
             client.send_message.assert_not_called()       # with no text, no message is sent
