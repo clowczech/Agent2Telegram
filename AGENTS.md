@@ -86,4 +86,5 @@ Install it per the printed hints so the bridge starts on boot and restarts on cr
 ## When done, tell the user
 - which agent is connected, the bot's @username,
 - that **only their** Telegram account can use it,
-- how to start a fresh conversation (`/reset`) and check status (`/status`).
+- how to check status (`/status`) and toggle spoken replies (`/voice`),
+- that `/help` in the chat lists everything the bridge itself handles.

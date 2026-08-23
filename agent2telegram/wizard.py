@@ -374,14 +374,14 @@ def _detect_agent_in_session(session: str):
 def connect(name: str | None = None) -> int:
     """`agent2telegram connect` — wire ONE existing agent (a tmux session) to its OWN Telegram bot,
     as a separate bridge with its own config file. Lets you run several bots from one install
-    (e.g. one per agent created with `agentsmon new`) without touching the others."""
+    (for example one per agent session) without touching the others."""
     print("=== Connect an agent to Telegram ===")
     if not _tmux():
         print("⚠️  tmux not found — attach mode drives a tmux session. Install tmux first.")
         return 1
     sessions = _list_sessions()
     if not sessions:
-        print("No tmux sessions found — create an agent first (e.g. `agentsmon new`), then re-run.")
+        print("No tmux sessions found — start your agent in a tmux session first, then re-run.")
         return 1
     print("\nWhich agent (tmux session) do you want to connect?\n")
     for i, s in enumerate(sessions, 1):
@@ -444,7 +444,8 @@ def connect(name: str | None = None) -> int:
                      stdin=subprocess.DEVNULL, start_new_session=True)
     print(f"  ✓ running — logs at {log}")
     print(f"  Message @{me.get('username')} on Telegram to test it.")
-    print("  Keep it alive across reboots by adding it to your monitoring (e.g.  agentsmon add).")
+    print("  Keep it alive across reboots with your process supervisor "
+          "(systemd, launchd — see `agent2telegram service`).")
     return 0
 
 

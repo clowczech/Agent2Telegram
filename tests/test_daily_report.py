@@ -225,3 +225,45 @@ class HealthTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class EndToEndTests(unittest.TestCase):
+    """The report must survive the one event it exists to report: a user complaint.
+
+    The previous version passed the LIST of complaints where a COUNT was expected, so
+    `int(list)` raised TypeError. It never showed up, because every unit test passed an integer
+    directly and an empty list happens to work. The report therefore died at exactly the moment
+    it mattered most — the day someone wrote that a reply never arrived.
+    """
+
+    LOG = [
+        "2026-08-09 09:00:00 INFO    agent2telegram.attach: TURN START t=1",
+        *[f"2026-08-09 09:0{i}:00 INFO    agent2telegram.attach: FWD (delivered) 'reply {i}'"
+          for i in range(1, 8)],
+        "2026-08-09 09:20:00 INFO    agent2telegram.attach: inject: '[TG] are you there?'",
+    ]
+
+    def _run(self, lines):
+        # Point the phrase lookup at an empty directory, so the built-in defaults are used and
+        # the result does not depend on whatever phrases this machine happens to have configured.
+        with tempfile.TemporaryDirectory() as d:
+            original, report.STATE = report.STATE, d
+            try:
+                found = report.complaints(lines)
+            finally:
+                report.STATE = original
+        v = report.analyse(lines)
+        return report.health(v, 0, len(found)), found
+
+    def test_a_complaint_in_the_log_lowers_the_score_without_crashing(self):
+        (pct, reasons), found = self._run(self.LOG)
+
+        self.assertEqual(len(found), 1, f"the complaint was not detected at all: {found}")
+        self.assertIsNotNone(pct)
+        self.assertLess(pct, 100, "a reported missing reply must cost something")
+        self.assertTrue(any("missing reply" in r for r in reasons), reasons)
+
+    def test_the_count_is_passed_as_a_number_not_as_the_list(self):
+        """Guards the exact shape of the old bug: health() must never be handed the list."""
+        with self.assertRaises(TypeError):
+            report.health({"replies": 50}, 0, ["a complaint"])

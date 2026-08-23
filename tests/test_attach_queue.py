@@ -406,3 +406,45 @@ class AttachOffsetPersistenceTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class InboundLogLineTests(unittest.TestCase):
+    """The IN log line is the record that a message ever arrived — it has to be readable.
+
+    A rename pass once swapped its two arguments, so the message preview appeared under
+    `reply_to=` and the quoted text after it. Nothing failed; the log simply lied, and the log is
+    what gets read when someone says "I wrote and nothing happened".
+    """
+
+    def _log_inbound(self, upd):
+        import logging
+        import tempfile as _tempfile
+        from agent2telegram.attach import AttachBridge
+        with _tempfile.TemporaryDirectory() as d:
+            b = object.__new__(AttachBridge)
+            b.cfg = Config(agent="generic", token="1:2", allowed_user_ids=[7], tmux_session="a2t")
+            b._offset_file = Path(d) / "offset"
+            b._processed_updates_file = Path(d) / "processed"
+            b._processed_update_ids, b._processed_update_order = set(), __import__("collections").deque()
+            b._maybe_ack_queued = lambda *a, **k: None
+            b._submit_inbound_update = lambda *a, **k: None
+            with self.assertLogs("agent2telegram.attach", level=logging.INFO) as cm:
+                b._handle_update_once(upd, 0)
+            return [r.getMessage() for r in cm.records if r.getMessage().startswith("IN  ")]
+
+    def test_reply_context_and_preview_are_not_swapped(self):
+        upd = {
+            "update_id": 1,
+            "message": {
+                "message_id": 1, "from": {"id": 7}, "chat": {"id": 7},
+                "text": "fix this",
+                "reply_to_message": {"text": "daily report: 2 failures"},
+            },
+        }
+        lines = self._log_inbound(upd)
+        self.assertTrue(lines, "the arrival of a message was not logged at all")
+        line = lines[0]
+        self.assertIn("reply_to='daily report: 2 failures'", line,
+                      f"reply_to must carry the QUOTED message, got: {line}")
+        self.assertTrue(line.rstrip().endswith("'fix this'"),
+                        f"the line must end with the message itself, got: {line}")

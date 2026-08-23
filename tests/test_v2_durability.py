@@ -157,7 +157,9 @@ class InjectFailureTests(unittest.TestCase):
             ok = b._inject("[TG] are you there?")
             self.assertFalse(ok, "inject was supposed to fail — that is the premise of this test")
 
-            notified = any("not delivered" in s.lower() or "failed" in s.lower()
+            # Matched against the text the bridge really sends, not a guess: _notify_inject_failed
+            # says "Couldn't deliver your message … failed after N attempts".
+            notified = any("couldn't deliver" in s.lower() or "failed after" in s.lower()
                            for s in b.tg.sent)
             retained = bool(getattr(b, "_pending_inbound", None)) or bool(
                 list(Path(td).glob("inbox/*"))

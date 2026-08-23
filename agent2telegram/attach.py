@@ -200,12 +200,13 @@ def _in_test_run() -> bool:
             or "pytest" in sys.modules
             or "unittest" in sys.modules)
 
+
 class AttachBridge:
     _turn_end_backstop_enabled = True
     #: Durable outbox with per-part confirmation. Off by default for objects built without
     #: __init__ (focused tests), which have no queue path to write to.
     _use_durable_outbox = True
-    
+
     def __init__(self, cfg: Config, *, client: TelegramClient | None = None) -> None:
         if not cfg.tmux_session:
             raise ValueError("attach mode requires 'tmux_session' in config")
@@ -686,7 +687,7 @@ class AttachBridge:
         quoted = (replied_to.get("text") or replied_to.get("caption") or "").replace("\n", " ")[:30]
         if quoted:
             log.info("IN  id=%s update=%s kind=%s reply_to=%r %r",
-                     record_id, update_id, kind, preview, quoted)
+                     record_id, update_id, kind, quoted, preview)
         else:
             log.info("IN  id=%s update=%s kind=%s %r", record_id, update_id, kind, preview)
         self._submit_inbound_update(upd, record_id)
