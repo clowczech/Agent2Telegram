@@ -789,6 +789,17 @@ class AttachBridge:
         outbox = getattr(self, "_outbox", None)
         if outbox is None:
             queue_path = getattr(self, "_queue_path", None)
+            if (queue_path is None and "PYTEST_CURRENT_TEST" in os.environ
+                    and not os.environ.get("AGENT2TELEGRAM_STATE")):
+                # HARD STOP. A test that forgets to isolate its queue would otherwise enqueue into
+                # the SHARED state directory, and the live bridge — a different process watching
+                # that same queue — delivers it to the real chat. That is not hypothetical: on
+                # 2026-08-23 a test run sent eleven fixture strings ("the real answer", "thanks!")
+                # straight to Petr. A test must never be able to reach a real chat, so the outbox
+                # refuses the default path instead of trusting every test to opt out.
+                log.error("durable outbox refused: test run without an isolated queue "
+                          "(set _queue_path or AGENT2TELEGRAM_STATE)")
+                return None
             root = Path(queue_path).parent if queue_path is not None else _state_dir(self.cfg)
             # OWN subdirectory, not the state root. DurableOutbox creates an "outbox" folder
             # under the root it is given — but `<state>/outbox` is ALSO the folder user
