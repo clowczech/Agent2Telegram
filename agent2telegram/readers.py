@@ -91,14 +91,34 @@ class ClaudeCodeReader:
     name = "claude-code"
     emits_turn_end = False
 
+    @staticmethod
+    def _is_tool_result(rec: dict) -> bool:
+        """A ``user`` record that is really a TOOL RESULT, not something the person typed.
+
+        Claude Code files tool results under ``type: "user"``. They are indistinguishable from a
+        real prompt by type alone, and treating one as a prompt is not cosmetic: the bridge
+        decides from the last user text whether the turn came from Telegram, so a tool result
+        silently reclassified a live Telegram turn as terminal-originated and the answer was
+        never forwarded — no error, no backstop, nothing in the log (2026-08-23, an image the
+        agent read mid-turn).
+        """
+        if "toolUseResult" in rec:
+            return True
+        content = (rec.get("message") or {}).get("content")
+        if isinstance(content, list):
+            return any(isinstance(b, dict) and b.get("type") == "tool_result" for b in content)
+        return False
+
     def user_text(self, rec: dict) -> str | None:
-        if rec.get("type") != "user":
+        if rec.get("type") != "user" or self._is_tool_result(rec):
             return None
         return _text_of(rec.get("message", {}).get("content"))
 
     def parse(self, rec: dict):
         typ = rec.get("type")
         if typ == "user":
+            if self._is_tool_result(rec):
+                return                      # a tool result is not something the person typed
             t = _text_of(rec.get("message", {}).get("content"))
             if t.strip():
                 yield Ev("user", text=t)

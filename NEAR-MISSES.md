@@ -289,3 +289,40 @@ deterministically without the fix (`tests/test_v2_durability.py::InboundDoneOrde
 they are updated is part of the contract, not an implementation detail. Write down which one may
 briefly disagree, and make sure the disagreement is the safe direction. Here the safe direction
 is "still busy" — a redundant skip costs nothing, a duplicate delivery costs trust.
+
+---
+
+## 2026-08-23 · A reply was lost, and nothing anywhere said so
+
+**Not a near miss — this one reached the user.** A Telegram turn ended with no answer, no
+backstop, and not a single line in the log. From the user's side the bridge simply went quiet;
+from the log's side the turn looked completed and healthy.
+
+**What happened:** during the turn the agent read an image. Claude Code files what a tool returns
+under `type: "user"`, and the bridge decides from the last user text whether a turn came from
+Telegram. The image record does not start with the origin prefix, so `_turn_from_tg` flipped to
+False mid-turn. From that instant the turn counted as terminal-originated: the reply was not
+forwarded, and the backstop — which only guards *Telegram* turns — never ran. Every guard was
+working exactly as written; they were all reading a flag that had quietly become wrong.
+
+**Why it slipped through:** the flag was re-derived from *every* user record instead of being
+decided once by the message that started the turn. That is invisible until a turn happens to
+contain a tool result, and it costs nothing until the one time it costs everything.
+
+**Two layers, because one is not enough:**
+1. The reader now recognises a tool result (`toolUseResult`, or a `tool_result` content block)
+   and does not report it as user text.
+2. A record without the origin prefix may no longer DOWNGRADE a running turn to local. Only the
+   start of a new turn may reset the flag.
+
+Layer 1 alone would not have fixed this case. Among the three records involved, two were proper
+tool results — but the third was a plain-string user record (`[Image: 3300x1880 …]`) with nothing
+in it to mark it as machine-generated. Only layer 2 catches that.
+
+**Also added:** the end of every turn now logs `from_tg`, `text_sent` and `reaction`, and an
+unanswered Telegram turn that somehow skips the backstop logs an error. The thing that made this
+expensive was not the bug — it was that afterwards there was nothing to read.
+
+**The rule worth keeping:** a flag that decides whether a user hears from you must be set by one
+identifiable event, not recomputed from whatever passes by. And **silence must never be a valid
+outcome**: if a turn ends unanswered, something has to say so.

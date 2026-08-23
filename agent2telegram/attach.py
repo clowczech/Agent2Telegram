@@ -1583,6 +1583,9 @@ class AttachBridge:
         """Drop the technical bubble and stop the typing indicator at the real end of a turn."""
         self._status_clear()
         was_active = self._turn_active.is_set()
+        from_tg_at_end = self._turn_from_tg
+        text_sent_at_end = self._turn_text_sent
+        reaction_at_end = getattr(self, "_turn_is_reaction", False)
         # Backstop: a Telegram-originated turn must NEVER go unanswered. If nothing was forwarded
         # this turn (the [tg] marker was forgotten, the turn was a long heads-down working stretch,
         # or interim forwarding missed it), deliver the final assistant message now. The
@@ -1616,6 +1619,15 @@ class AttachBridge:
                           "signal_configured=%s",
                           dur, self._typing_count, getattr(self, "_transcript", None) is not None,
                           getattr(self, "_signal", None) is not None)
+        elif (was_active and self._turn_from_tg and not self._turn_text_sent
+                and self._owner_chat is not None
+                and not getattr(self, "_turn_is_reaction", False)):
+            # Should be unreachable — the branch above covers it. Kept because on 2026-08-23 a
+            # Telegram turn ended with no forward and NO log line at all, which made the cause
+            # impossible to determine after the fact. Whatever silently skips the backstop must
+            # leave a trace.
+            log.error("TURN END: Telegram turn ended unanswered and the backstop did not run "
+                      "(backstop_enabled=%s)", getattr(self, "_turn_end_backstop_enabled", True))
         elif (was_active and getattr(self, "_turn_is_reaction", False)
                 and not self._turn_text_sent):
             # Intended silence, but it must still be visible in the log — otherwise a genuinely
@@ -1625,9 +1637,14 @@ class AttachBridge:
         self._pending_turn_end = False
         self._consume_turn_end()
         if was_active:
-            log.info("TURN END t=%.2f dur=%.1fs typing_fired=%d max_gap=%.2fs",
+            # from_tg/text_sent are in the line on purpose: when a reply goes missing, these two
+            # flags decide whether anything was even attempted, and reconstructing them
+            # afterwards from the log was impossible (2026-08-23).
+            log.info("TURN END t=%.2f dur=%.1fs typing_fired=%d max_gap=%.2fs "
+                     "from_tg=%s text_sent=%s reaction=%s",
                      time.time(), time.monotonic() - self._turn_started,
-                     self._typing_count, self._max_gap)
+                     self._typing_count, self._max_gap, from_tg_at_end, text_sent_at_end,
+                     reaction_at_end)
 
     def _end_turn(self) -> None:
         # Claude Stop-hook path: catch anything written just before the hook fired, then finish.
@@ -1896,7 +1913,17 @@ class AttachBridge:
         if ev.kind == "user":
             # Remember whether this turn came from Telegram (origin prefix) — only those are
             # forwarded; terminal-originated turns stay local.
-            self._turn_from_tg = ev.text.lstrip().startswith(self._origins)
+            #
+            # A record WITHOUT the prefix may never downgrade a turn that is already marked as
+            # Telegram-originated. The reader now filters tool results out, but anything else the
+            # transcript files as a "user" record would otherwise silently reclassify a live turn
+            # as local — and then the answer is never forwarded, the backstop never runs, and
+            # nothing at all appears in the log. That happened on 2026-08-23. A new turn resets
+            # the flag in _begin_turn; that is the only place it may go back to False.
+            if ev.text.lstrip().startswith(self._origins):
+                self._turn_from_tg = True
+            elif not self._turn_active.is_set():
+                self._turn_from_tg = False
             return
         if ev.kind == "turn_start":
             if not self._turn_active.is_set():
