@@ -1068,7 +1068,7 @@ class AttachBridge:
                 # The backstop exemption below is the safety net for when the agent still stays
                 # silent. Without it the backstop ("a Telegram turn must never go unanswered")
                 # grabs the last assistant text and can forward an INTERNAL note — that is how
-                # "No response requested." reached the user (Genius bridge, 2026-08-02). Silence
+                # "No response requested." reached a user on a live bridge (2026-08-02). Silence
                 # is the lesser evil; the log line in _finish_turn keeps it visible.
                 # Only when no turn was running: a reaction landing mid-turn must not disarm the
                 # backstop for the real question underneath it.
@@ -1199,7 +1199,7 @@ class AttachBridge:
         # Clear any end-of-turn signal left over from the PREVIOUS turn. Codex writes
         # task_complete to the rollout with a delay, so a late one could land after the next
         # turn had already started and end it within ~1 s — the reply was then never sent and
-        # the backstop never fired (Sol, 2026-08-02: voice note answered with silence).
+        # the backstop never fired (2026-08-02: a voice note answered with silence).
         self._pending_turn_end = False
         self._turn_begun_at = now
         # Seed the TUI dedup with tool lines ALREADY on screen from previous turns, so the

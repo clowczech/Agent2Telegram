@@ -30,13 +30,13 @@ class DurableInboxTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             record_id = DurableInbox(root).reserve(
-                {"update_id": 42, "message": {"text": "nesmi zmizet"}}
+                {"update_id": 42, "message": {"text": "must not vanish"}}
             )
 
             after_restart = DurableInbox(root)
             pending = after_restart.pending()
             self.assertEqual([record.id for record in pending], [record_id])
-            self.assertEqual(pending[0].update["message"]["text"], "nesmi zmizet")
+            self.assertEqual(pending[0].update["message"]["text"], "must not vanish")
 
     def test_pending_reloads_repeatedly_and_done_is_durable(self):
         with tempfile.TemporaryDirectory() as td:
@@ -253,8 +253,8 @@ class DurableOutboxTests(unittest.TestCase):
     def test_key_deduplicates_pending_enqueue(self):
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
-            first = DurableOutbox(root).enqueue(["odpoved"], ["/tmp/x"], "uuid-1")
-            second = DurableOutbox(root).enqueue(["odpoved"], ["/tmp/x"], "uuid-1")
+            first = DurableOutbox(root).enqueue(["reply"], ["/tmp/x"], "uuid-1")
+            second = DurableOutbox(root).enqueue(["reply"], ["/tmp/x"], "uuid-1")
             self.assertEqual(first, second)
             self.assertEqual(len(DurableOutbox(root).pending()), 1)
             with self.assertRaises(RecordConflictError):

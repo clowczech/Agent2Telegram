@@ -471,7 +471,7 @@ def set_elevenlabs(config: str | None = None) -> int:
     path = save(cfg)
     print(f"  ✓ Saved to {path} (permissions 0600).")
     # One ElevenLabs account = one key for ALL bots. Apply it to every bridge config in the dir
-    # so voice works across all agents (Codex / Claude Code / Hermes / OpenClaw) after setting it
+    # so voice works across every configured agent after setting it
     # once — not just the active bridge.
     from .config import config_path, load as load_cfg
     others = 0
