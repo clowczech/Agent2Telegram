@@ -262,3 +262,30 @@ it returns nothing at all — better no transcript than the wrong one, because t
 file forwards the wrong text. The wider rule: **the configuration you run yourself does not
 exercise every path you ship.** A report from a differently configured user is evidence you
 cannot generate on your own machine.
+
+---
+
+## 2026-08-23 · A finished message could be delivered twice
+
+**What happened:** CI failed on a test that had passed locally: an inbound message was delivered
+twice. `_inbound_done()` removed the record from the in-flight set BEFORE deleting it from the
+durable inbox. In that window the record is "not in flight" and still "pending on disk", so a
+concurrent `_replay_pending_inbound()` landing there submits it a second time.
+
+**Why it slipped through:** the window is a few microseconds wide, and whether anything lands in
+it depends on the machine. On a developer laptop the test passed; on a CI runner it did not. A
+test that passes because of timing is not evidence — it is luck that has not run out yet.
+
+**Damage:** none reaching a user. The queue exists precisely to make "exactly once" true, so this
+was the failure mode it is built against, hiding inside the mechanism itself.
+
+**What catches it next time:** the delete now happens first, so during cleanup the record still
+counts as in flight and replay skips it; afterwards replay cannot see it at all. The in-flight id
+is released in a `finally`, so a failed delete cannot strand it. The regression test does not
+race — it runs the replay from INSIDE the delete, i.e. exactly in the window, so it fails
+deterministically without the fix (`tests/test_v2_durability.py::InboundDoneOrderingTests`).
+
+**The rule worth keeping:** when two data structures describe the same fact, the ORDER in which
+they are updated is part of the contract, not an implementation detail. Write down which one may
+briefly disagree, and make sure the disagreement is the safe direction. Here the safe direction
+is "still busy" — a redundant skip costs nothing, a duplicate delivery costs trust.
