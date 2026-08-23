@@ -951,17 +951,17 @@ class AttachBridge:
         if inbox is None:
             return 0
         try:
-            cekajici = inbox.pending()
+            waiting = inbox.pending()
         except Exception as e:
             log.error("could not read the leftover inbound messages: %s", e)
             return 0
-        rozpracovane = self._inbound_inflight()
-        cekajici = [r for r in cekajici if r.record_id not in rozpracovane]
-        for rec in cekajici:
+        in_flight = self._inbound_inflight()
+        waiting = [r for r in waiting if r.record_id not in in_flight]
+        for rec in waiting:
             self._submit_inbound_update(rec.update, rec.record_id)
-        if cekajici:
-            log.info("delivering %d message(s) left over from before restart", len(cekajici))
-        return len(cekajici)
+        if waiting:
+            log.info("delivering %d message(s) left over from before restart", len(waiting))
+        return len(waiting)
 
     def _inbound_worker_loop(self) -> None:
         """Process accepted Telegram updates FIFO outside the long-poll thread.
@@ -971,21 +971,21 @@ class AttachBridge:
         """
         while not self._stop.is_set() or not self._inbound_queue.empty():
             try:
-                polozka = self._inbound_queue.get(timeout=0.2)
+                item = self._inbound_queue.get(timeout=0.2)
             except queue.Empty:
                 continue
-            upd, record_id = polozka if isinstance(polozka, tuple) else (polozka, None)
+            upd, record_id = item if isinstance(item, tuple) else (item, None)
             try:
-                doruceno = self._handle(upd)
+                delivered = self._handle(upd)
             except Exception as e:
                 log.exception("inbound worker error: %s", e)
                 self._inbound_failed(record_id, str(e))
             else:
                 # `_handle` returns False when the message never reached the session. Both cases
                 # used to just call task_done and the message vanished — that is audit finding B.
-                if doruceno is not False:
+                if delivered is not False:
                     log.info("IN  delivered to session id=%s", record_id)
-                if doruceno is False:
+                if delivered is False:
                     self._inbound_failed(record_id, "not delivered to the session")
                 else:
                     self._inbound_done(record_id)
@@ -993,13 +993,24 @@ class AttachBridge:
                 self._inbound_queue.task_done()
 
     def _inbound_done(self, record_id: str | None) -> None:
-        self._inbound_inflight().discard(record_id)
+        # ORDER MATTERS. Removing the record from the in-flight set BEFORE deleting it from the
+        # inbox leaves a window where it is "not in flight" and still "pending on disk" — and a
+        # concurrent _replay_pending_inbound() lands exactly there and submits the message a
+        # SECOND time. The user gets the same message twice. Caught by CI, where the timing
+        # differs enough for the window to be hit.
+        #
+        # Deleting from the inbox first closes it: while the delete runs the record still counts
+        # as in flight (so replay skips it), and once it is gone replay cannot see it at all.
         inbox = getattr(self, "_inbox", None)
-        if record_id and inbox is not None:
-            try:
+        try:
+            if record_id and inbox is not None:
                 inbox.done(record_id)
-            except Exception as e:
-                log.warning("cleanup of delivered record %s failed: %s", record_id, e)
+        except Exception as e:
+            log.warning("cleanup of delivered record %s failed: %s", record_id, e)
+        finally:
+            # Always release the id, even if the delete failed — otherwise it stays marked in
+            # flight forever and the message can never be retried.
+            self._inbound_inflight().discard(record_id)
 
     def _inbound_failed(self, record_id: str | None, reason: str) -> None:
         """Not delivered → the record stays and is retried. After the attempts are exhausted it

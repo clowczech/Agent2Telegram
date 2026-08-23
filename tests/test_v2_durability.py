@@ -1044,3 +1044,61 @@ class StaleTurnEndTests(unittest.TestCase):
             b._tui_seen = set()
             b._begin_turn()
             self.assertGreater(getattr(b, "_turn_begun_at", 0), 0)
+
+
+class InboundDoneOrderingTests(unittest.TestCase):
+    """Finishing a message must never leave it visible to the replay.
+
+    `_inbound_done` used to drop the record from the in-flight set BEFORE deleting it from the
+    inbox. In that window the record is "not in flight" and still "pending on disk", so a
+    concurrent replay submits the message a SECOND time. It passed on one machine and failed on
+    CI, where the timing differs — the worst kind of bug to trust to luck.
+
+    This test does not race: it runs the replay from INSIDE the delete, which is exactly the
+    window, so it either always passes or always fails.
+    """
+
+    def test_a_replay_during_cleanup_does_not_resubmit_the_message(self):
+        with tempfile.TemporaryDirectory() as td:
+            b = _bridge(td)
+            b._ensure_inbound_worker_state()
+            inbox = b._ensure_inbox()
+            record_id = inbox.reserve(_msg(7777, "exactly once"))
+            b._inbound_inflight().add(record_id)
+
+            submitted = []
+            b._submit_inbound_update = lambda upd, rid=None: submitted.append(rid)
+
+            real_done = inbox.done
+
+            def done_but_replay_first(rid):
+                # The replay runs while the record is being cleaned up — the exact window.
+                b._replay_pending_inbound()
+                return real_done(rid)
+
+            inbox.done = done_but_replay_first
+            b._inbound_done(record_id)
+
+            self.assertEqual(
+                submitted, [],
+                "a replay during cleanup resubmitted the message — the user would get it twice",
+            )
+            self.assertNotIn(record_id, b._inbound_inflight(),
+                             "the id stayed marked in flight, so the message could never retry")
+
+    def test_a_failed_cleanup_still_releases_the_in_flight_id(self):
+        """If the delete throws, the id must still be released — otherwise it is stuck forever."""
+        with tempfile.TemporaryDirectory() as td:
+            b = _bridge(td)
+            b._ensure_inbound_worker_state()
+            inbox = b._ensure_inbox()
+            record_id = inbox.reserve(_msg(7778, "cleanup fails"))
+            b._inbound_inflight().add(record_id)
+
+            def boom(_rid):
+                raise OSError(28, "No space left on device")
+
+            inbox.done = boom
+            b._inbound_done(record_id)
+
+            self.assertNotIn(record_id, b._inbound_inflight())
