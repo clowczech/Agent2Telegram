@@ -178,3 +178,30 @@ vstup odpověď?" a podle toho zkontrolovat backstop. V testech teď existuje t�
 To pole ale zároveň řídí TUI bubliny a hlavně – reakce, která dorazí **během** běžícího turnu,
 by tím odzbrojila backstop pro skutečnou otázku pod ní. Proto vlastní příznak a podmínka
 „jen když žádný turn neběžel".
+
+---
+
+## 2026-08-23 · Codex změnil formát logu – bridge by oněměl při první aktualizaci
+
+**Co se stalo:** Jiří Přecechtěl (Petrův účastník webináře) nahlásil, že mu po aktualizaci na
+**Codex 0.149.0** bridge přestal doručovat odpovědi. Agent viditelně odpovídal, do Telegramu
+nikdy nic nepřišlo. Příčina: novější Codex zapisuje odpověď agenta už jen jako
+`response_item/message` (role=assistant), zatímco `CodexReader` četl výhradně
+`event_msg/agent_message`.
+
+**Proč to prošlo:** reader byl napsaný proti **jedné konkrétní verzi** formátu, který ale patří
+cizímu nástroji a mění se bez ohlášení. Náš Codex 0.144.4 zapisuje obě formy, takže o tom
+z našeho provozu nešlo nic poznat.
+
+**Škoda:** u nás žádná. U Jiřího hodiny hledání a málem zbytečná reinstalace. **Nás by to trefilo
+při první aktualizaci Codexu** – umlčelo by to `Lana - Sol`.
+
+**Co to příště chytne:** reader teď čte obě formy a dedupuje **podle obsahu**, ne podle typu
+záznamu (`tests/test_readers_codex.py`, ověřeno mutací). Pravidlo do hlavy: **formát logu cizího
+nástroje je API, které se mění bez ohlášení** – číst tolerantně a mít test na obě varianty.
+Druhá past odhalená při opravě: nainstalovaný balíček `/opt/homebrew/bin/agent2telegram` importuje
+modul z **`~/Agent2Telegram` (v1)**, takže oprava jen ve v2 by se do produkce nepropsala.
+Kontrola: `python3.14 -c "import agent2telegram, os; print(os.path.dirname(agent2telegram.__file__))"`.
+
+**Nejhorší na tom je tvar selhání:** bridge nespadne, nezaloguje chybu, jen tiše mlčí a dál
+ukazuje „typing". To je přesně ta tichá chyba, kterou má tenhle deník lovit.
