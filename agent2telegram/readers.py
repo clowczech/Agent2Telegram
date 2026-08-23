@@ -151,6 +151,18 @@ def _codex_tool_summary(payload: dict) -> str:
     return "🛠️ tool"
 
 
+def _codex_output_text(payload: dict) -> str:
+    """Join the ``output_text`` parts of a Codex ``response_item/message`` payload."""
+    parts = payload.get("content")
+    if not isinstance(parts, list):
+        return ""
+    out = []
+    for part in parts:
+        if isinstance(part, dict) and part.get("type") in ("output_text", "text"):
+            out.append(part.get("text") or "")
+    return "".join(out).strip()
+
+
 class CodexReader:
     """Codex CLI rollout transcript (``~/.codex/sessions/.../rollout-*.jsonl``). Each line is an
     ``event_msg`` or ``response_item`` with a ``payload.type``. Crucially it records explicit
@@ -159,6 +171,14 @@ class CodexReader:
 
     name = "codex"
     emits_turn_end = True
+
+    def __init__(self) -> None:
+        # Codex <= 0.144 logs an agent reply TWICE: first as ``event_msg/agent_message``, then as
+        # ``response_item/message`` (role=assistant). Newer Codex (>= 0.149) logs ONLY the second
+        # form. We therefore read both and remember what we already emitted, so old versions do not
+        # double-send and new versions do not go silent. Silence is the dangerous failure here: the
+        # bridge keeps showing "typing" while the reply never arrives (Jiří Přecechtěl, 2026-08-23).
+        self._emitted_msgs: set[str] = set()
 
     def user_text(self, rec: dict) -> str | None:
         p = rec.get("payload") if isinstance(rec.get("payload"), dict) else {}
@@ -180,8 +200,16 @@ class CodexReader:
             msg = (p.get("message") or "").strip()
             if msg:
                 ts = rec.get("timestamp", "")
+                self._emitted_msgs.add(_hash(msg))
                 yield Ev("text", text=msg, key=f"{ts}:{_hash(msg)}",
                          final=(p.get("phase") == "final_answer"))
+        elif t == "response_item" and pt == "message" and p.get("role") == "assistant":
+            # Fallback for Codex >= 0.149, which no longer emits event_msg/agent_message.
+            msg = _codex_output_text(p)
+            if msg and _hash(msg) not in self._emitted_msgs:
+                ts = rec.get("timestamp", "")
+                self._emitted_msgs.add(_hash(msg))
+                yield Ev("text", text=msg, key=f"{ts}:{_hash(msg)}", final=True)
         elif t == "response_item" and pt in ("function_call", "custom_tool_call", "web_search_call"):
             if pt == "web_search_call":
                 action = p.get("action") if isinstance(p.get("action"), dict) else {}
