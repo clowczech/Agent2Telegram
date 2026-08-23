@@ -233,3 +233,32 @@ queue**; a test has to declare its isolation explicitly (`_queue_path` or
 `AGENT2TELEGRAM_STATE`). See `tests/test_outbox_isolation.py`, verified by mutation. The rule to
 remember: **there must be no path from a test to a real user, even if the test author never
 thinks about it** — opt-out is the wrong direction, the guarantee belongs in the code.
+
+
+---
+
+## 2026-08-23 · Subagent transcripts win the "newest" race
+
+**What happened:** reported by a user running Claude Code with an architect/tester/reviewer setup:
+the agent finishes its work, writes a summary, and nothing arrives. From outside it looks as if
+the agent silently stopped reporting; you have to go and ask.
+
+**Mechanics:** Claude Code stores subagent transcripts under `<conversation>/subagents/`.
+`_newest_under()` globs recursively, and a running subagent writes far more often than the main
+conversation — so on mtime it always wins. The bridge tails the subagent and the reply written to
+the main conversation is never forwarded. In the reporter's directory, 17 of 21 transcripts were
+subagents; in another installation, 413 of 426.
+
+**Why it slipped through:** the resolver was written when subagents did not exist, and the
+installations that would have shown it pin an explicit `transcript_path`, which skips the
+resolver entirely. A bug in a code path you do not use yourself cannot be found by using the
+software — only by someone whose setup differs.
+
+**Damage:** none in the installations we can see; hours of confusion for the reporter.
+
+**What catches it next time:** the resolver ignores anything under a `subagents/` path segment
+(`tests/test_transcript_resolution.py`, verified by mutation). If only subagent transcripts exist
+it returns nothing at all — better no transcript than the wrong one, because tailing the wrong
+file forwards the wrong text. The wider rule: **the configuration you run yourself does not
+exercise every path you ship.** A report from a differently configured user is evidence you
+cannot generate on your own machine.

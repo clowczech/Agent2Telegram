@@ -276,6 +276,12 @@ class AttachBridge:
         files: list[str] = []
         for pat in (patterns or ("*.jsonl",)):
             files = glob.glob(str(base / "**" / pat), recursive=True)
+            # Claude Code writes subagent transcripts under "<conversation>/subagents/". A running
+            # subagent writes far more often than the main conversation, so on mtime it always
+            # wins the "newest" race — the bridge then tails the subagent and the summary the
+            # agent writes to the user is never forwarded. Reported by a user running an
+            # architect/tester/reviewer setup, where 17 of 21 transcripts were subagents.
+            files = [f for f in files if f"{os.sep}subagents{os.sep}" not in f]
             if files:
                 break
         if not files:
