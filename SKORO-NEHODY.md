@@ -205,3 +205,27 @@ Kontrola: `python3.14 -c "import agent2telegram, os; print(os.path.dirname(agent
 
 **Nejhorší na tom je tvar selhání:** bridge nespadne, nezaloguje chybu, jen tiše mlčí a dál
 ukazuje „typing". To je přesně ta tichá chyba, kterou má tenhle deník lovit.
+
+---
+
+## 2026-08-23 · Testovací zprávy dorazily Petrovi do Telegramu
+
+**Co se stalo:** při porovnávání repozitářů jsem pustila **starou verzi**
+`tests/test_attach_backstop.py` (z repa v1) proti novému kódu. Ta verze nenastavuje
+`_use_durable_outbox = False`, takže se fixture stringy zapsaly do durable outboxu ve
+**sdíleném** state adresáři – a běžící bridge, jiný proces nad toutéž frontou, je poslal
+Petrovi. Jedenáct zpráv typu „the real answer", „thanks!", „a brand new answer".
+
+**Proč to prošlo:** izolace testu stála na tom, že si autor **vzpomene** vypnout outbox.
+Nový kód přidal `_use_durable_outbox`, starý test o něm nevěděl. Nic mezi testem a reálným
+chatem nestálo – a `b.tg` byl fake, takže z pohledu testu se „nic neodeslalo". Skutečné
+doručení proběhlo úplně jinou cestou, přes disk.
+
+**Škoda:** jedenáct nesmyslných zpráv Petrovi. Kdyby fixture obsahovala něco citlivého,
+bylo by to horší.
+
+**Co to příště chytne:** `_ensure_outbox()` pod pytestem **odmítne výchozí sdílenou frontu**;
+test si izolaci musí říct explicitně (`_queue_path` nebo `AGENT2TELEGRAM_STATE`).
+Test `tests/test_outbox_isolation.py`, ověřeno mutací. Pravidlo do hlavy: **cesta z testu
+k reálnému uživateli nesmí existovat, i kdyby si na ni autor testu nevzpomněl** – opt-out
+je špatný směr, záruku musí držet kód.
