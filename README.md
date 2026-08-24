@@ -299,7 +299,15 @@ MIT — see [LICENSE](LICENSE).
 
 ## Sending files from the agent
 
-The agent can attach a file by putting a line like this in its reply:
+**If your agent has its own file-sending tool, just use it.** Claude Code's `SendUserFile` is
+recognised automatically: the bridge sees the call in the transcript and delivers the files. No
+marker, no configuration, nothing to remember — it works on the first try.
+
+The harness runs that tool itself, so the bridge never sees a call, only its record in the
+transcript. Before this was recognised the file silently vanished: the reply arrived, the
+attachment did not, and nothing in the log said so.
+
+There is also an explicit marker, which works with any agent — put a line like this in the reply:
 
 ```
 [tg-file] /Users/me/.local/state/agent2telegram/outbox/clip.mp4

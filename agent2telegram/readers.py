@@ -32,10 +32,11 @@ from dataclasses import dataclass
 
 @dataclass
 class Ev:
-    kind: str               # turn_start | user | text | tool | turn_end
+    kind: str               # turn_start | user | text | tool | files | turn_end
     text: str = ""          # message / tool-summary text
     key: str = ""           # stable dedup id (text uuid/hash, tool call id)
     final: bool = False      # for 'text': hint that this is the final answer
+    files: tuple = ()        # for 'files': paths the agent wants delivered to the user
 
 
 def _short(s: str, n: int = 58) -> str:
@@ -81,6 +82,29 @@ def _text_of(content) -> str:
         return "\n".join(b.get("text", "") for b in content
                          if isinstance(b, dict) and b.get("type") == "text")
     return ""
+
+
+
+#: Tools by which an agent hands a FILE to the user. The harness runs them itself, so the bridge
+#: never sees a call — only its record in the transcript. Without this the file silently vanishes:
+#: the reply arrives, the attachment does not, and nothing anywhere says so (2026-08-24).
+#: Recognising the tool by name is deliberate — it beats guessing from prose, which would be
+#: language-dependent and full of false positives.
+FILE_SEND_TOOLS = {"senduserfile"}
+
+
+def _file_tool_paths(name: str, inp) -> tuple:
+    """Paths a file-sending tool call asks to deliver, or () when it is not such a call."""
+    if str(name or "").strip().lower() not in FILE_SEND_TOOLS:
+        return ()
+    if not isinstance(inp, dict):
+        return ()
+    raw = inp.get("files") or inp.get("file") or inp.get("paths") or inp.get("path")
+    if isinstance(raw, str):
+        raw = [raw]
+    if not isinstance(raw, list):
+        return ()
+    return tuple(p for p in raw if isinstance(p, str) and p.strip())
 
 
 class ClaudeCodeReader:
@@ -136,8 +160,13 @@ class ClaudeCodeReader:
         for b in blocks:
             if isinstance(b, dict) and b.get("type") == "tool_use":
                 tid = b.get("id")
-                if tid:
-                    yield Ev("tool", text=_claude_tool_summary(b.get("name", ""), b.get("input")), key=tid)
+                if not tid:
+                    continue
+                paths = _file_tool_paths(b.get("name", ""), b.get("input"))
+                if paths:
+                    yield Ev("files", key=tid, files=paths)
+                    continue                      # not a tool bubble — it is an attachment
+                yield Ev("tool", text=_claude_tool_summary(b.get("name", ""), b.get("input")), key=tid)
 
 
 # --------------------------------------------------------------------------- Codex

@@ -326,3 +326,37 @@ expensive was not the bug — it was that afterwards there was nothing to read.
 **The rule worth keeping:** a flag that decides whether a user hears from you must be set by one
 identifiable event, not recomputed from whatever passes by. And **silence must never be a valid
 outcome**: if a turn ends unanswered, something has to say so.
+
+---
+
+## 2026-08-24 · The agent's own file-sending tool delivered nothing
+
+**What happened:** the agent used its harness's built-in file-sending tool (Claude Code's
+`SendUserFile`) three times in one day. Every time the text arrived and the file did not. No
+error, no log line, nothing in the queue or dead-letter — the attachment simply ceased to exist.
+The user noticed, twice, by asking "it didn't arrive".
+
+**Why it slipped through:** the harness runs that tool ITSELF. The bridge never sees a call — the
+only trace is a `tool_use` record in the transcript, which the bridge was reading and discarding
+as an ordinary tool bubble. The bridge's own marker (`[tg-file]`) worked perfectly the whole time,
+which made it look like an agent habit rather than a gap in the product. It is both: every Claude
+Code user has that tool in their toolbox and will reach for it first, because it is the obvious
+one.
+
+**Damage:** three lost deliveries here, and a silent failure waiting for every Claude Code user
+of the public project.
+
+**What was rejected, and why it matters:** the first proposal was to detect intent from the reply
+text ("sending", "attached", a filename) and warn when no marker was present. The maintainer
+rejected it outright — it is language-dependent, guessy, and would fire false alarms. He was
+right: the reply text is prose, and prose is the wrong place to look for a fact the transcript
+already states exactly.
+
+**The fix:** recognise the tool BY NAME in the transcript and deliver its files through the same
+allowlist as a marker line. Deterministic, language-independent, and it works on the first try
+without the agent knowing anything. The agent now reaches for the obvious tool and it simply
+works.
+
+**The rule worth keeping:** when an agent can do a thing two ways and only one of them is wired
+up, that is not a documentation problem — the unwired path will be taken, because it looks
+right. Wire it up, or make it fail loudly. Never let it be silent.

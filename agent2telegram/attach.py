@@ -1943,6 +1943,15 @@ class AttachBridge:
                 # Reliable forward: the dedup ledger is marked only AFTER a confirmed send, and a
                 # failed send is queued + retried — so a reply is never silently dropped.
                 self._send_final(out, key=ev.key)
+        elif ev.kind == "files":
+            # The agent used its own file-sending tool. The harness runs that tool itself, so the
+            # bridge never sees a call — only this record in the transcript. Deliver the files the
+            # same way as a [tg-file] line, INCLUDING the allowlist check: the path comes from
+            # agent output either way, so the security boundary must not differ.
+            if ev.key in self._seen_tools:
+                return                            # already handled (transcript re-read on resume)
+            self._seen_tools.add(ev.key)
+            self._send_files(list(ev.files))
         elif ev.kind == "tool":
             if self.cfg.agent == "codex":
                 return                            # Codex tools come live from the TUI scraper
