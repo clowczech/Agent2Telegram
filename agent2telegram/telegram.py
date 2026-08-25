@@ -351,7 +351,27 @@ class TelegramClient:
             fields[k] = v
         with open(path, "rb") as fh:
             payload = fh.read()
-        self._call_multipart(method, fields, field, os.path.basename(path), payload)
+        try:
+            self._call_multipart(method, fields, field, os.path.basename(path), payload)
+        except TelegramError:
+            # Telegram rejects perfectly valid files when they do not fit the *display*
+            # rules of the specialised method: a photo may be at most 10 MB with
+            # width + height <= 10000 and a side ratio <= 20, a video must be decodable,
+            # and so on. A tall screenshot or a stitched chart trips this routinely.
+            # The bytes are fine, only the presentation is not, so fall back to a plain
+            # document. That keeps the file, and the alternative is losing it outright.
+            if method == "sendDocument":
+                raise
+            log.warning("%s rejected %s, retrying as a document",
+                        method, os.path.basename(path))
+            fields.pop("supports_streaming", None)
+            for k in ("width", "height", "duration", "title", "performer"):
+                fields.pop(k, None)
+            self._call_multipart("sendDocument", fields, "document",
+                                 os.path.basename(path), payload)
+            log.info("sent %s (sendDocument after %s, %d bytes)",
+                     os.path.basename(path), method, size)
+            return
         log.info("sent %s (%s, %d bytes)", os.path.basename(path), method, size)
 
     def send_voice(self, chat_id: int, path) -> None:
