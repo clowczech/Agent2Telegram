@@ -102,8 +102,14 @@ def running_sessions() -> list[dict]:
 
 
 def _live_claude_pids() -> set:
-    """PIDy skutečně běžících `claude.exe` procesů (interaktivní i resume). Prázdná
-    množina = nepodařilo se zjistit → volající pak filtr přeskočí (fail-open)."""
+    """PIDy skutečně běžících Claude procesů. Prázdná množina = nepodařilo se
+    zjistit → volající pak filtr přeskočí (fail-open).
+
+    Pozor na tvary: terminál/rc = `claude.exe` či `claude`, ale sessions z APPKY
+    běží jako `~/.claude/remote/ccd-cli/<verze>` — filtr jen na "claude.exe" je
+    všechny vyhodil a /bezi spadl ze 43 na 4 místo na správných 16 (30. 8.).
+    Substring "claude" pokryje všechny tvary; PIDy stejně pochází z `claude
+    agents`, tady jen ověřujeme, že PID nebyl recyklován cizím procesem."""
     try:
         out = _run(["ps", "-axo", "pid=,command="], 5)
     except (subprocess.SubprocessError, OSError):
@@ -111,7 +117,7 @@ def _live_claude_pids() -> set:
     pids = set()
     for line in out.splitlines():
         line = line.strip()
-        if not line or "claude.exe" not in line:
+        if not line or "claude" not in line.lower():
             continue
         head = line.split(None, 1)[0]
         try:
