@@ -287,6 +287,11 @@ class AttachBridge:
         # Voice-reply mode is persisted in the state dir (survives restart), not just memory.
         self._voice_state_path = _state_dir(self.cfg) / "voice_mode"
         self._voice_on = self._load_voice_state()
+        # Přepnutý cíl (/bezi) přežije restart mostu — jinak deploy tiše vrací na tmux.
+        self._resume_target = self._load_resume_target()
+        if self._resume_target is not None:
+            log.info("restored resume target sid=%s (%s)",
+                     self._resume_target.sid[:8], self._resume_target.topic[:30])
         # Persisted ledger of already-forwarded message uuids — survives restarts/crashes/reboots
         # so resuming an interrupted turn never re-sends what was already delivered.
         self._sent_path = Path.home() / ".config" / "agent2telegram" / "attach_sent.txt"
@@ -1511,9 +1516,11 @@ class AttachBridge:
                 self.tg.send_message(chat_id, f"⚠️ Nejde se připojit: {e}")
                 return
             self._resume_target = None
+            self._save_resume_target()
             self.cfg.tmux_session = tmux_name
             self._transcript = None
             self._last_resolve = 0.0          # ať se transcript přepointuje hned
+            log.info("SWITCH → tmux '%s' (%s)", tmux_name, r["topic"][:30])
             self.tg.send_message(chat_id,
                 f"✅ Přepnuto na *{r['topic']}* (tmux `{tmux_name}`). Piš — jdeš do živé session.")
         else:
@@ -1521,10 +1528,38 @@ class AttachBridge:
             # vzniká jako odbočka konverzace; navazující zprávy odbočku sledují dál.
             self._resume_target = switcher.ResumeTarget(
                 sid, r["cwd"], r["topic"], timeout=self.cfg.agent_timeout)
+            self._save_resume_target()
+            log.info("SWITCH → resume sid=%s (%s)", sid[:8], r["topic"][:30])
             self.tg.send_message(chat_id,
                 f"✅ Přepnuto na *{r['topic']}* (headless, přes --resume).\n"
                 "⚠️ Session zároveň drží appka — tvoje zprávy tady tvoří vlastní větev "
                 "konverzace se stejným kontextem.")
+
+    def _resume_state_path(self) -> Path:
+        return _state_dir(self.cfg) / "resume_target.json"
+
+    def _save_resume_target(self) -> None:
+        """Persist the switched target so a bridge restart doesn't silently snap back to
+        the tmux session (bit a user on 2026-08-30: deploy restart ate his /bezi switch)."""
+        rt = getattr(self, "_resume_target", None)
+        p = self._resume_state_path()
+        try:
+            if rt is None:
+                p.unlink(missing_ok=True)
+            else:
+                p.parent.mkdir(parents=True, exist_ok=True)
+                p.write_text(json.dumps({"sid": rt.sid, "cwd": rt.cwd, "topic": rt.topic}),
+                             encoding="utf-8")
+        except OSError as e:
+            log.warning("could not persist resume target: %s", e)
+
+    def _load_resume_target(self):
+        try:
+            d = json.loads(self._resume_state_path().read_text("utf-8"))
+            return switcher.ResumeTarget(d["sid"], d.get("cwd", ""), d.get("topic", ""),
+                                         timeout=self.cfg.agent_timeout)
+        except (OSError, ValueError, KeyError):
+            return None
 
     def _resume_worker(self, text: str) -> None:
         """One headless exchange. Runs in its own thread; typing is lit while it works."""
@@ -1534,7 +1569,13 @@ class AttachBridge:
             self._turn_active.clear()
             return
         try:
-            reply = rt.send(text)
+            # Bez označení původu instance NEMÁ jak poznat, kudy zpráva přišla — jedna
+            # naživo tvrdila, že hlasovka z Telegramu dorazila „přes appku“ (30. 8.).
+            prompt = ("[Zpráva přišla z Telegramu přes Agent2Telegram most; odpověď se "
+                      "doručí uživateli do Telegramu — odpověz přímo a stručně.]\n" + text)
+            reply = rt.send(prompt)
+            self._save_resume_target()       # sid se mohl posunout (fork-follow)
+            log.info("FWD (resume) sid=%s %r", rt.sid[:8], reply[:40])
             self.tg.send_message(chat, reply)
         except Exception as e:
             log.error("resume send failed: %s", e)
