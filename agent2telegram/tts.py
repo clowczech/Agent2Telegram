@@ -107,3 +107,17 @@ def synthesize(text: str, *, api_key: str, voice_id: str, model_id: str = DEFAUL
         log.warning("ElevenLabs TTS transient failure (%d/%d): %s", attempt + 1, attempts, detail)
         sleeper(retry_backoffs[attempt])
     raise TTSError("ElevenLabs TTS failed")   # pragma: no cover
+
+
+def synthesize_local_wav(text: str, command: list[str], out_path: str, *,
+                         timeout: float = 180) -> None:
+    """Speak *text* with a LOCAL command (e.g. Piper). ``{output}`` in *command* is replaced
+    with *out_path*; the text arrives on the command's stdin. Raises on any failure."""
+    import os as _os
+    import subprocess as _sp
+    argv = [out_path if tok == "{output}" else tok.replace("{output}", out_path)
+            for tok in command]
+    r = _sp.run(argv, input=text, capture_output=True, text=True, timeout=timeout)
+    if r.returncode != 0 or not _os.path.exists(out_path) or _os.path.getsize(out_path) == 0:
+        raise RuntimeError(
+            f"local TTS failed (rc={r.returncode}): {(r.stderr or '').strip()[:300]}")

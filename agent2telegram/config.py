@@ -43,6 +43,13 @@ class Config:
     elevenlabs_api_key: str = ""        # optional: enables voice-message transcription (STT)
     tts_voice_id: str = "XB0fDUnXU5powFXDhCwa"   # ElevenLabs voice for /voice replies (Charlotte)
     tts_model_id: str = "eleven_v3"  # v3: better numeral accuracy, steadier generation, multilingual
+    # ---- local voice (no cloud, no key) ----
+    # STT: argv template; ``{input}`` is replaced with a 16 kHz mono WAV path, the transcript
+    # is read from stdout. TTS: argv template; ``{output}`` is replaced with the WAV path to
+    # write, the text to speak arrives on stdin. When set, they are used whenever no
+    # ElevenLabs key is configured — the key, if present, still wins (explicit user choice).
+    local_stt_command: list[str] | None = None
+    local_tts_command: list[str] | None = None
     # ---- persistent "attach" mode (drive an existing live agent session) ----
     mode: str = "oneshot"               # "oneshot" | "attach"
     tmux_session: str = ""              # name of the existing tmux session to drive

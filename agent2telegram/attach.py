@@ -1420,7 +1420,9 @@ class AttachBridge:
         labels = {"codex": "Codex", "claude-code": "Claude Code"}
         agent = labels.get(self.cfg.agent, self.cfg.agent)
         if cmd in ("start", "help"):
-            voice = "on" if self.cfg.elevenlabs_api_key else "off — enable with /setkey"
+            voice = ("on" if (self.cfg.elevenlabs_api_key
+                              or getattr(self.cfg, "local_stt_command", None))
+                     else "off — enable with /setkey")
             self.tg.send_message(chat_id,
                 f"👋 You're connected to a live *{agent}* session via Agent2Telegram.\n\n"
                 "Just send a message — it goes straight to the agent and you'll see typing, live "
@@ -1433,7 +1435,9 @@ class AttachBridge:
             self.tg.send_message(chat_id, f"Your Telegram id: `{chat_id}`")
             return True
         if cmd == "status":
-            voice = "✓" if self.cfg.elevenlabs_api_key else "✗"
+            voice = ("✓ local" if (not self.cfg.elevenlabs_api_key
+                                    and getattr(self.cfg, "local_stt_command", None))
+                     else ("✓" if self.cfg.elevenlabs_api_key else "✗"))
             replies = "🔊 on" if self._voice_reply_on() else "🔇 off"
             rt = getattr(self, "_resume_target", None)
             target = (f"headless session „{rt.topic or rt.sid[:8]}“ (přes --resume)" if rt
@@ -1551,7 +1555,9 @@ class AttachBridge:
 
     def _voice_reply_on(self) -> bool:
         """Voice replies only when the switch is on AND a key exists to actually synthesize."""
-        return bool(getattr(self, "_voice_on", False) and self.cfg.elevenlabs_api_key)
+        return bool(getattr(self, "_voice_on", False)
+                    and (self.cfg.elevenlabs_api_key
+                         or getattr(self.cfg, "local_tts_command", None)))
 
     def _set_voice_state(self, on: bool) -> None:
         self._voice_on = on
@@ -1568,29 +1574,35 @@ class AttachBridge:
         sendVoice). Returns True on success; on ANY failure returns False so the caller falls
         back to durable text. Never raises — voice must not break delivery."""
         key = self.cfg.elevenlabs_api_key
-        if not key:
+        local_cmd = getattr(self.cfg, "local_tts_command", None)
+        if not key and not local_cmd:
             return False
         ffmpeg = shutil.which("ffmpeg")
         if not ffmpeg:
             log.warning("voice reply skipped: ffmpeg not on PATH")
             return False
-        try:
-            spoken = tts.sanitize_for_speech(text)            # rough safety net only
-            mp3 = tts.synthesize(spoken, api_key=key, voice_id=self.cfg.tts_voice_id,
-                                 model_id=self.cfg.tts_model_id)
-        except Exception as e:
-            log.warning("voice reply TTS failed: %s", e)
-            return False
         tmpdir = tempfile.mkdtemp(prefix="a2t_voice_")
         try:
-            mp3_path = os.path.join(tmpdir, "reply.mp3")
+            spoken = tts.sanitize_for_speech(text)            # rough safety net only
+            if key:                                            # explicitní klíč má přednost
+                mp3 = tts.synthesize(spoken, api_key=key, voice_id=self.cfg.tts_voice_id,
+                                     model_id=self.cfg.tts_model_id)
+                src_path = os.path.join(tmpdir, "reply.mp3")
+                with open(src_path, "wb") as fh:
+                    fh.write(mp3)
+            else:                                              # lokální TTS (Piper)
+                src_path = os.path.join(tmpdir, "reply.wav")
+                tts.synthesize_local_wav(spoken, local_cmd, src_path)
+        except Exception as e:
+            log.warning("voice reply TTS failed: %s", e)
+            shutil.rmtree(tmpdir, ignore_errors=True)
+            return False
+        try:
             ogg_path = os.path.join(tmpdir, "reply.ogg")
-            with open(mp3_path, "wb") as fh:
-                fh.write(mp3)
             # OGG/OPUS is what Telegram wants for a real voice bubble; other formats become a
             # plain audio attachment. No shell.
             r = subprocess.run(
-                [ffmpeg, "-y", "-i", mp3_path, "-c:a", "libopus", "-b:a", "32k", ogg_path],
+                [ffmpeg, "-y", "-i", src_path, "-c:a", "libopus", "-b:a", "32k", ogg_path],
                 capture_output=True, timeout=60,
             )
             if r.returncode != 0 or not os.path.exists(ogg_path) or os.path.getsize(ogg_path) == 0:
@@ -1606,7 +1618,7 @@ class AttachBridge:
             shutil.rmtree(tmpdir, ignore_errors=True)
 
     def _toggle_voice(self, chat_id: int) -> bool:
-        if not self.cfg.elevenlabs_api_key:
+        if not self.cfg.elevenlabs_api_key and not getattr(self.cfg, "local_tts_command", None):
             self.tg.send_message(chat_id,
                 "🔊 Voice replies need an ElevenLabs key first. Add one with /setkey, then /voice.")
             return True
@@ -2177,7 +2189,8 @@ class AttachBridge:
 
     def _transcribe(self, media: dict, chat_id: int) -> str | None:
         from . import stt
-        if not self.cfg.elevenlabs_api_key:
+        local_cmd = getattr(self.cfg, "local_stt_command", None)
+        if not self.cfg.elevenlabs_api_key and not local_cmd:
             self.tg.send_message(chat_id,
                 "🎤 Voice transcription isn't enabled yet. Add your ElevenLabs key with "
                 "`/setkey <your-key>` (I'll delete the message right after) — then resend the voice note.")
@@ -2197,8 +2210,11 @@ class AttachBridge:
                 self._reject_audio_too_large(chat_id, len(audio))
                 log.warning("downloaded voice/audio too large for STT: %s bytes", len(audio))
                 return None
-            return stt.transcribe(audio, api_key=self.cfg.elevenlabs_api_key,
-                                  filename=Path(fp).name or "voice.ogg")
+            if self.cfg.elevenlabs_api_key:      # explicitní klíč má přednost
+                return stt.transcribe(audio, api_key=self.cfg.elevenlabs_api_key,
+                                      filename=Path(fp).name or "voice.ogg")
+            return stt.transcribe_local(audio, local_cmd,
+                                        filename=Path(fp).name or "voice.ogg")
         except Exception as e:
             log.error("transcription failed: %s", e)
             # This is an inbound voice-note failure, not agent output for the current turn.

@@ -164,3 +164,46 @@ def looks_like_api_key(key: str) -> bool:
 def transcribe(audio: bytes, *, api_key: str, filename: str = "voice.ogg") -> str:
     """Provider dispatcher (only ElevenLabs Scribe today)."""
     return transcribe_elevenlabs(audio, api_key=api_key, filename=filename)
+
+
+class TranscriptionError(Exception):
+    pass
+
+
+def transcribe_local(audio: bytes, command: list[str], *, filename: str = "voice.ogg",
+                     timeout: float = 180) -> str:
+    """Transcribe with a LOCAL command (no cloud, no key).
+
+    The audio (whatever Telegram sent, typically OGG/OPUS) is converted to 16 kHz mono WAV
+    with ffmpeg first — every local STT tool eats that. ``{input}`` in *command* is replaced
+    with the WAV path; the transcript is the command's stdout.
+    """
+    import shutil as _shutil
+    import subprocess as _sp
+    import tempfile as _tf
+    import os as _os
+    ffmpeg = _shutil.which("ffmpeg")
+    if not ffmpeg:
+        raise TranscriptionError("ffmpeg is required for local transcription but is not on PATH")
+    tmpdir = _tf.mkdtemp(prefix="a2t_stt_")
+    try:
+        src = _os.path.join(tmpdir, filename or "voice.ogg")
+        wav = _os.path.join(tmpdir, "voice.wav")
+        with open(src, "wb") as fh:
+            fh.write(audio)
+        r = _sp.run([ffmpeg, "-y", "-i", src, "-ar", "16000", "-ac", "1", wav],
+                    capture_output=True, timeout=60)
+        if r.returncode != 0 or not _os.path.exists(wav):
+            raise TranscriptionError(f"ffmpeg conversion failed (rc={r.returncode})")
+        argv = [wav if tok == "{input}" else tok.replace("{input}", wav) for tok in command]
+        r = _sp.run(argv, capture_output=True, text=True, timeout=timeout,
+                    stdin=_sp.DEVNULL)
+        if r.returncode != 0:
+            raise TranscriptionError(
+                f"local STT failed (rc={r.returncode}): {(r.stderr or '').strip()[:300]}")
+        text = (r.stdout or "").strip()
+        if not text:
+            raise TranscriptionError("local STT returned an empty transcript")
+        return text
+    finally:
+        _shutil.rmtree(tmpdir, ignore_errors=True)
