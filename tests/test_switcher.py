@@ -74,3 +74,58 @@ class RunningSessionsTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CloseSessionTests(unittest.TestCase):
+    """/zavri — zabít procesy držící konverzaci, ale nikdy ne sebe."""
+
+    PS = ("  100 /Users/j/.claude/remote/ccd-cli/2.1 --resume SID-A\n"
+          "  200 /Users/j/.claude/remote/ccd-cli/2.1 --resume SID-A\n"
+          "  300 /Users/j/.claude/remote/ccd-cli/2.1 --resume SID-B\n"
+          "  999 claude -p --resume SID-A prompt\n")
+
+    def _run(self, argv, timeout=15):
+        if argv[:2] == ["ps", "-axo"] and argv[2].startswith("pid=,command"):
+            return self.PS
+        if argv[:2] == ["ps", "-axo"]:            # pid=,ppid= pro strom procesů
+            return "999 1\n100 1\n200 1\n300 1\n"
+        return ""
+
+    def test_finds_pids_and_skips_own_tree(self):
+        with mock.patch.object(switcher, "_run", side_effect=self._run), \
+             mock.patch.object(switcher.os, "getpid", return_value=999):
+            self.assertEqual(switcher.pids_for_session("SID-A"), [100, 200])
+            self.assertEqual(switcher.pids_for_session("SID-B"), [300])
+            self.assertEqual(switcher.pids_for_session(""), [])
+
+    def test_close_kills_every_holder(self):
+        killed = []
+        with mock.patch.object(switcher, "_run", side_effect=self._run), \
+             mock.patch.object(switcher.os, "getpid", return_value=999), \
+             mock.patch.object(switcher, "_pid_alive", return_value=False), \
+             mock.patch.object(switcher, "tmux_session_for_pid", return_value=None), \
+             mock.patch.object(switcher.os, "kill", side_effect=lambda p, s: killed.append((p, s))):
+            res = switcher.close_session("SID-A", grace=0)
+        self.assertEqual(res["killed"], [100, 200])
+        self.assertEqual(res["left"], [])
+        self.assertEqual(killed, [(100, 15), (200, 15)])   # SIGTERM, ne rovnou -9
+
+    def test_close_escalates_to_sigkill(self):
+        sent = []
+        alive = {100: True}
+        with mock.patch.object(switcher, "_run", side_effect=self._run), \
+             mock.patch.object(switcher.os, "getpid", return_value=999), \
+             mock.patch.object(switcher, "tmux_session_for_pid", return_value=None), \
+             mock.patch.object(switcher, "_pid_alive", side_effect=lambda p: alive.get(p, False)), \
+             mock.patch.object(switcher.os, "kill",
+                               side_effect=lambda p, s: (sent.append((p, s)),
+                                                         alive.pop(p, None) if s == 9 else None)):
+            res = switcher.close_session("SID-A", grace=0)
+        self.assertIn((100, 9), sent)
+        self.assertEqual(res["left"], [])
+
+    def test_close_when_nothing_runs(self):
+        with mock.patch.object(switcher, "_run", side_effect=self._run), \
+             mock.patch.object(switcher.os, "getpid", return_value=999):
+            res = switcher.close_session("SID-NEEXISTUJE", grace=0)
+        self.assertEqual(res["killed"], [])       # není chyba, jen už nic neběží

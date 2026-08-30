@@ -360,3 +360,102 @@ def _first_cwd(path: Path) -> str:
     except OSError:
         pass
     return ""
+
+
+# ---------------------------------------------------------------- zavírání sessions
+def _own_process_tree() -> set:
+    """PIDy, které NIKDY nezabíjet: most sám a celý jeho rodičovský řetěz.
+
+    Bez toho by `/zavri` na aktuální cíl sestřelil i proces, který ten příkaz právě
+    obsluhuje. Most sice `/zavri` řeší sám (žádný `claude -p --resume` u toho neběží),
+    ale jistota stojí za deset řádků — stačí jedno budoucí volání z jiného místa.
+    """
+    safe, pid = set(), os.getpid()
+    try:
+        ppids = {}
+        for line in _run(["ps", "-axo", "pid=,ppid="], 5).splitlines():
+            try:
+                p, pp = (int(x) for x in line.split())
+            except ValueError:
+                continue
+            ppids[p] = pp
+        while pid and pid not in safe:
+            safe.add(pid)
+            pid = ppids.get(pid, 0)
+    except (subprocess.SubprocessError, OSError):
+        safe.add(os.getpid())
+    return safe
+
+
+def pids_for_session(sid: str) -> list[int]:
+    """Živé procesy, které drží konverzaci *sid* — tedy to, co ji drží v `/bezi`.
+
+    Hledá se podle sid v příkazové řádce: appka i Remote Control pouštějí
+    `~/.claude/remote/ccd-cli/<verze>` s `--resume <sid>`. Pozor, appka nechává běžet
+    až čtyři procesy TÉŽE konverzace (staré při každém otevření nezavře), takže tohle
+    běžně vrací víc než jeden PID — a dokud žije jediný z nich, session v `/bezi` visí.
+    """
+    if not sid:
+        return []
+    try:
+        out = _run(["ps", "-axo", "pid=,command="], 5)
+    except (subprocess.SubprocessError, OSError):
+        return []
+    safe, pids = _own_process_tree(), []
+    for line in out.splitlines():
+        line = line.strip()
+        if sid not in line:
+            continue
+        try:
+            p = int(line.split(None, 1)[0])
+        except (ValueError, IndexError):
+            continue
+        if p in safe:
+            continue
+        pids.append(p)
+    return pids
+
+
+def close_session(sid: str, grace: float = 1.5) -> dict:
+    """Ukončit konverzaci *sid* → zmizí z `/bezi`. Transcript na disku ZŮSTÁVÁ.
+
+    Vrací ``{"killed": [pid…], "left": [pid…], "tmux": name|None}``. Prázdné `killed`
+    i `left` znamená, že už nic neběželo — což je taky úspěch, ne chyba.
+
+    U session v tmuxu procesy zabít jde, ale zůstane po ní prázdný pane; volající to
+    má uživateli říct a nabídnout `tmux kill-session`.
+    """
+    pids = pids_for_session(sid)
+    tmux = None
+    for p in pids:
+        tmux = tmux or tmux_session_for_pid(p)
+    killed = []
+    for p in pids:
+        try:
+            os.kill(p, 15)          # SIGTERM: ať si Claude stihne zavřít transcript
+            killed.append(p)
+        except (ProcessLookupError, PermissionError) as e:
+            log.warning("kill %s failed: %s", p, e)
+    if killed:
+        time.sleep(grace)
+    left = [p for p in killed if _pid_alive(p)]
+    for p in left:
+        try:
+            os.kill(p, 9)           # tvrdohlavý zbytek
+        except (ProcessLookupError, PermissionError):
+            pass
+    if left:
+        time.sleep(0.5)
+        left = [p for p in left if _pid_alive(p)]
+    log.info("CLOSE sid=%s killed=%s left=%s tmux=%s", sid[:8], killed, left, tmux)
+    return {"killed": killed, "left": left, "tmux": tmux}
+
+
+def _pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True

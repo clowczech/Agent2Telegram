@@ -110,11 +110,12 @@ BOT_COMMANDS = [
     {"command": "id", "description": "Show your Telegram id"},
     {"command": "bezi", "description": "Vypsat běžící Claude sessions a přepnout cíl"},
     {"command": "hist", "description": "Ukončené konverzace — klepnutím oživit"},
+    {"command": "zavri", "description": "Ukončit session — zmizí z /bezi"},
 ]
 
 #: Every command the bridge answers itself, including the aliases missing from BOT_COMMANDS.
 #: Used to recognise a command that does not open the message — see `_bridge_command`.
-BRIDGE_COMMANDS = {c["command"] for c in BOT_COMMANDS} | {"skoc", "sessions"}
+BRIDGE_COMMANDS = {c["command"] for c in BOT_COMMANDS} | {"skoc", "sessions", "zavrit"}
 
 #: A trailing command is only honoured in a message this short. Long enough for "Aha tady. Tak
 #: /bezi", short enough that a sentence *about* the bridge still reaches the agent.
@@ -1457,6 +1458,8 @@ class AttachBridge:
             return self._cmd_bezi(chat_id)
         if cmd in ("hist", "historie"):
             return self._cmd_hist(chat_id)
+        if cmd in ("zavri", "zavrit"):
+            return self._cmd_zavri(chat_id)
         if cmd == "setkey":
             return self._set_voice_key(arg, chat_id, message_id)
         if cmd == "voice":
@@ -1509,6 +1512,61 @@ class AttachBridge:
                               + "\n".join(lines), reply_markup={"inline_keyboard": keyboard})
         return True
 
+    def _cmd_zavri(self, chat_id: int) -> bool:
+        """/zavri — ukončit běžící session, ať zmizí z /bezi. Transcript zůstává.
+
+        Záměrně jen seznam s tlačítky, žádné „zavři aktuální" naslepo: zabíjení cizích
+        procesů je jediná destruktivní věc, kterou most umí, a stojí za jedno klepnutí
+        navíc. Aktuální cíl je označený ▶, takže je pořád na jeden tap.
+        """
+        if self.cfg.agent != "claude-code":
+            self.tg.send_message(chat_id, "Zavírání sessions umí jen Claude Code.")
+            return True
+        rows = switcher.running_sessions()
+        if not rows:
+            self.tg.send_message(chat_id, "Žádná Claude session neběží.")
+            return True
+        rt = getattr(self, "_resume_target", None)
+        lines, keyboard = [], []
+        for i, r in enumerate(rows, 1):
+            tmux_name = switcher.tmux_session_for_pid(r.get("pid"))
+            where = f"tmux:{tmux_name}" if tmux_name else "headless"
+            current = ((rt and r["sid"] == rt.sid) or
+                       (not rt and tmux_name == self.cfg.tmux_session))
+            mark = "▶ " if current else ""
+            cwd = r["cwd"].replace(str(Path.home()), "~")
+            lines.append(f"{mark}{i}) {r['topic']}  ·  {where}  ·  {r['age']}  ·  {cwd}")
+            keyboard.append([{"text": f"❌ {i}) {r['topic']}",
+                              "callback_data": f"cl:{r['sid']}"}])
+        self.tg.send_plain_id(chat_id, "Co ukončit? (transcript zůstane, /hist ji oživí)\n"
+                              + "\n".join(lines), reply_markup={"inline_keyboard": keyboard})
+        return True
+
+    def _close_target(self, sid: str, chat_id: int) -> None:
+        rows = switcher.running_sessions()
+        r = next((x for x in rows if x["sid"] == sid), None)
+        topic = r["topic"] if r else sid[:8]
+        try:
+            res = switcher.close_session(sid)
+        except Exception as e:                      # noqa: BLE001 — hlásit, ne spadnout
+            log.warning("close_session(%s) failed: %s", sid[:8], e)
+            self.tg.send_message(chat_id, f"⚠️ Nepovedlo se zavřít *{topic}*: {e}")
+            return
+        rt = getattr(self, "_resume_target", None)
+        if rt and rt.sid == sid:                    # zavřel jsem cíl, na kterém stojím
+            self._resume_target = None
+            self._save_resume_target()
+        if not res["killed"]:
+            self.tg.send_message(chat_id, f"*{topic}* už neběžela — z /bezi je pryč.")
+            return
+        msg = f"✅ *{topic}* ukončena ({len(res['killed'])} proc.). Transcript zůstal, /hist ji oživí."
+        if res["left"]:
+            msg += f"\n⚠️ Nešly zabít: {', '.join(map(str, res['left']))}"
+        if res["tmux"]:
+            msg += (f"\n⚠️ Běžela v tmuxu `{res['tmux']}` — zůstal prázdný pane, "
+                    f"ukliď ho přes `konec {res['tmux']}`.")
+        self.tg.send_message(chat_id, msg)
+
     def _handle_callback(self, cq: dict) -> bool:
         """A button press. ACK it fast, drop the stale keyboard, then act."""
         data = cq.get("data", "") or ""
@@ -1518,6 +1576,9 @@ class AttachBridge:
         if data.startswith("sw:") and chat_id is not None:
             self.tg.edit_reply_markup(chat_id, msg.get("message_id"))
             self._switch_target(data[3:], chat_id)
+        elif data.startswith("cl:") and chat_id is not None:
+            self.tg.edit_reply_markup(chat_id, msg.get("message_id"))
+            self._close_target(data[3:], chat_id)
         return True
 
     def _switch_target(self, sid: str, chat_id: int) -> None:
