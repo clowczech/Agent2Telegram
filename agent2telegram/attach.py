@@ -111,6 +111,14 @@ BOT_COMMANDS = [
     {"command": "bezi", "description": "Vypsat běžící Claude sessions a přepnout cíl"},
 ]
 
+#: Every command the bridge answers itself, including the aliases missing from BOT_COMMANDS.
+#: Used to recognise a command that does not open the message — see `_bridge_command`.
+BRIDGE_COMMANDS = {c["command"] for c in BOT_COMMANDS} | {"skoc", "sessions"}
+
+#: A trailing command is only honoured in a message this short. Long enough for "Aha tady. Tak
+#: /bezi", short enough that a sentence *about* the bridge still reaches the agent.
+MAX_TRAILING_COMMAND_CHARS = 60
+
 #: Injected ahead of the user's message while voice mode is ON, so the AGENT writes a reply meant
 #: to be HEARD rather than read. This marker — not a regex — is the heart of voice mode: the model
 #: phrases speakable text (short, numbers as words, no paths) far better than any post-processing.
@@ -384,6 +392,12 @@ class AttachBridge:
         """Newest Claude Code transcript for the driven session, scoped by cwd so it never picks
         up another concurrent Claude session (Claude stores transcripts under a per-cwd project
         dir: ``~/.claude/projects/<cwd-with-slashes-as-dashes>/``)."""
+        # Přesné určení přes PID agenta v panelu má VŽDY přednost: mtime závod selže,
+        # jakmile víc sessions sdílí cwd (typicky ~) — čtečka pak tailuje cizí transcript
+        # a odpovědi se tiše zadrží (from_tg=False). Vidět naživo hned při prvním tahu.
+        exact = switcher.transcript_for_tmux(self.cfg.tmux_session)
+        if exact is not None:
+            return exact
         base = Path.home() / ".claude" / "projects"
         cwd = self._session_cwd()
         dirs: list[Path] = []
@@ -1158,9 +1172,10 @@ class AttachBridge:
         # forwarded to the agent — so the first contact is a friendly intro, not the agent
         # puzzling over "/start". Only plain-text commands, never media captions.
         text0 = (msg.get("text") or "").strip()
-        if text0.startswith("/") and not (msg.get("voice") or msg.get("audio")
-                                           or msg.get("photo") or msg.get("document")):
-            if self._handle_command(text0, chat_id, msg.get("message_id")):
+        if not (msg.get("voice") or msg.get("audio")
+                or msg.get("photo") or msg.get("document")):
+            command = _bridge_command(text0)
+            if command and self._handle_command(command, chat_id, msg.get("message_id")):
                 return True
 
         text = (msg.get("text") or msg.get("caption") or "").strip()

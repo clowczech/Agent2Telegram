@@ -170,3 +170,65 @@ class ResumeTarget:
         if data.get("is_error"):
             raise RuntimeError(str(data.get("result", ""))[:500] or "claude reported an error")
         return str(data.get("result", "")).strip() or "(empty response)"
+
+
+# Cache: agent_for_tmux běží z resolučního cyklu mostu, tak ať nespouští
+# `claude agents --json` několikrát za sekundu.
+_afm_cache: dict = {}
+_AFM_TTL = 10.0
+
+
+def agent_for_tmux(name: str) -> dict | None:
+    """The running Claude session INSIDE tmux session *name* (via the process tree).
+
+    This pins the bridge to the pane's own transcript. Resolving "newest .jsonl under
+    the pane's cwd" breaks the moment several sessions share a cwd (typically ~): a
+    busier sibling always wins the mtime race, the reader tails a foreign transcript,
+    never sees the origin-prefixed user record, and replies are silently withheld.
+    Seen live on the very first bridged turn (2026-08-30)."""
+    now = time.time()
+    hit = _afm_cache.get(name)
+    if hit and now - hit[0] < _AFM_TTL:
+        return hit[1]
+    row = _agent_for_tmux_uncached(name)
+    _afm_cache[name] = (now, row)
+    return row
+
+
+def _agent_for_tmux_uncached(name: str) -> dict | None:
+    try:
+        panes = _run(["tmux", "list-panes", "-t", name, "-F", "#{pane_pid}"], 5)
+        ps = _run(["ps", "-axo", "pid=,ppid="], 5)
+    except (subprocess.SubprocessError, OSError):
+        return None
+    children: dict[int, list[int]] = {}
+    for line in ps.splitlines():
+        try:
+            pid, ppid = (int(x) for x in line.split())
+        except ValueError:
+            continue
+        children.setdefault(ppid, []).append(pid)
+    subtree: set[int] = set()
+    for pane_pid in panes.split():
+        try:
+            stack = [int(pane_pid)]
+        except ValueError:
+            continue
+        while stack:
+            cur = stack.pop()
+            subtree.add(cur)
+            stack.extend(children.get(cur, ()))
+    if not subtree:
+        return None
+    for r in running_sessions():
+        if r.get("pid") in subtree:
+            return r
+    return None
+
+
+def transcript_for_tmux(name: str) -> Path | None:
+    """Exact transcript path of the Claude session running in tmux session *name*."""
+    r = agent_for_tmux(name)
+    if not r:
+        return None
+    return _transcript_path(r["cwd"], r["sid"])
