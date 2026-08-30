@@ -109,6 +109,7 @@ BOT_COMMANDS = [
     {"command": "voice", "description": "Toggle spoken (voice-note) replies"},
     {"command": "id", "description": "Show your Telegram id"},
     {"command": "bezi", "description": "Vypsat běžící Claude sessions a přepnout cíl"},
+    {"command": "hist", "description": "Ukončené konverzace — klepnutím oživit"},
 ]
 
 #: Every command the bridge answers itself, including the aliases missing from BOT_COMMANDS.
@@ -1454,6 +1455,8 @@ class AttachBridge:
             return True
         if cmd in ("bezi", "skoc", "sessions"):
             return self._cmd_bezi(chat_id)
+        if cmd in ("hist", "historie"):
+            return self._cmd_hist(chat_id)
         if cmd == "setkey":
             return self._set_voice_key(arg, chat_id, message_id)
         if cmd == "voice":
@@ -1487,6 +1490,25 @@ class AttachBridge:
                               + "\n".join(lines), reply_markup={"inline_keyboard": keyboard})
         return True
 
+    def _cmd_hist(self, chat_id: int) -> bool:
+        """/hist — recently ENDED conversations; a tap revives one via --resume."""
+        if self.cfg.agent != "claude-code":
+            self.tg.send_message(chat_id, "Historie umí jen Claude Code.")
+            return True
+        rows = switcher.recent_ended_sessions()
+        if not rows:
+            self.tg.send_message(chat_id, "Žádné ukončené konverzace nenalezeny.")
+            return True
+        lines, keyboard = [], []
+        for i, r in enumerate(rows, 1):
+            cwd = r["cwd"].replace(str(Path.home()), "~")
+            lines.append(f"{i}) {r['topic']}  ·  {r['age']}  ·  {cwd}")
+            keyboard.append([{"text": f"{i}) {r['topic']}",
+                              "callback_data": f"sw:{r['sid']}"}])
+        self.tg.send_plain_id(chat_id, "Ukončené konverzace — klepnutím ji oživíš:\n"
+                              + "\n".join(lines), reply_markup={"inline_keyboard": keyboard})
+        return True
+
     def _handle_callback(self, cq: dict) -> bool:
         """A button press. ACK it fast, drop the stale keyboard, then act."""
         data = cq.get("data", "") or ""
@@ -1502,7 +1524,9 @@ class AttachBridge:
         rows = switcher.running_sessions()
         r = next((x for x in rows if x["sid"] == sid), None)
         if r is None:
-            self.tg.send_message(chat_id, "Ta session už neběží — pošli /bezi znovu.")
+            r = switcher.session_from_disk(sid)     # ukončená (/hist) — oživí ji --resume
+        if r is None:
+            self.tg.send_message(chat_id, "Tu session nemůžu najít — pošli /bezi nebo /hist znovu.")
             return
         tmux_name = switcher.tmux_session_for_pid(r.get("pid"))
         if tmux_name:

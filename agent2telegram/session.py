@@ -281,9 +281,31 @@ class TmuxSession:
         if self._origin:
             text = f"{self._origin}{text}"
         text = sanitize_for_tmux(text)
+        # C-u níže smaže rozepsaný řádek. Když je u panelu připojený člověk A zrovna má
+        # v promptu text, zprávu radši odložíme (SessionError → durable inbox ji za 30 s
+        # zkusí znovu), než mu smazat rozepsanou větu. Samotné připojení nevadí — teprve
+        # připojení + neprázdný prompt.
+        if self._human_is_typing():
+            raise SessionError(
+                f"someone is typing in tmux session '{self.name}' — deferring the injection")
         _tmux("send-keys", "-t", self.name, "C-u"); time.sleep(0.05)
         _tmux("send-keys", "-t", self.name, "-l", "--", text); time.sleep(0.15)
         _tmux("send-keys", "-t", self.name, "Enter")
+
+    def _human_is_typing(self) -> bool:
+        """True when a human client is attached AND the TUI prompt line holds text."""
+        try:
+            attached = _tmux("display-message", "-p", "-t", self.name,
+                             "#{session_attached}", check=False, timeout=3).stdout.strip()
+            if attached in ("", "0"):
+                return False
+            for line in reversed(self._capture().splitlines()):
+                ls = line.strip()
+                if ls.startswith("❯"):
+                    return len(ls.lstrip("❯").strip()) > 0
+            return False
+        except Exception:
+            return False        # při pochybách neblokovat doručení
 
     def _capture(self) -> str:
         return _tmux("capture-pane", "-p", "-t", self.name, check=False).stdout

@@ -232,3 +232,56 @@ def transcript_for_tmux(name: str) -> Path | None:
     if not r:
         return None
     return _transcript_path(r["cwd"], r["sid"])
+
+
+def recent_ended_sessions(n: int = 8, base: Path | None = None) -> list[dict]:
+    """Nedávno UKONČENÉ konverzace (transcript na disku, ale neběží) — pro /hist.
+    `claude -p --resume` je umí oživit i po ukončení."""
+    base = base or (Path.home() / ".claude" / "projects")
+    running = {r["sid"] for r in running_sessions()}
+    files = []
+    for d in base.glob("*"):
+        if "shim" in d.name or "Caches" in d.name:
+            continue
+        for f in d.glob("*.jsonl"):
+            try:
+                files.append((f.stat().st_mtime, f))
+            except OSError:
+                pass
+    files.sort(reverse=True)
+    out = []
+    for _, f in files:
+        sid = f.stem
+        if sid in running:
+            continue
+        cwd = _first_cwd(f)
+        out.append({"sid": sid, "cwd": cwd or str(Path.home()),
+                    "topic": _topic(f) or "(bez tématu)", "age": _age(f), "pid": None})
+        if len(out) >= n:
+            break
+    return out
+
+
+def session_from_disk(sid: str, base: Path | None = None) -> dict | None:
+    """Najde session podle sid v transcriptech na disku (i ukončenou)."""
+    base = base or (Path.home() / ".claude" / "projects")
+    for f in base.glob(f"*/{sid}.jsonl"):
+        cwd = _first_cwd(f)
+        return {"sid": sid, "cwd": cwd or str(Path.home()),
+                "topic": _topic(f) or "(bez tématu)", "age": _age(f), "pid": None}
+    return None
+
+
+def _first_cwd(path: Path) -> str:
+    try:
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                try:
+                    c = json.loads(line).get("cwd", "")
+                except ValueError:
+                    continue
+                if c:
+                    return c
+    except OSError:
+        pass
+    return ""
