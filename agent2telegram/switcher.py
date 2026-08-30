@@ -79,18 +79,46 @@ def running_sessions() -> list[dict]:
     except (subprocess.SubprocessError, OSError, json.JSONDecodeError) as e:
         log.warning("claude agents --json failed: %s", e)
         return []
-    out = []
+    # `claude agents --json` hlásí i DÁVNO UKONČENÉ sessions a skončené subagenty (PID
+    # se mezitím recykloval na cizí proces, takže os.kill(pid,0) je nepozná). Filtrujeme
+    # na PIDy, které opravdu patří živému `claude.exe` — jinak /bezi ukázal 43 řádků,
+    # z toho 37 mrtvých (30. 8. 2026). Duplicitní sid navíc sjednotíme na nejnovější.
+    live = _live_claude_pids()
+    out, seen = [], set()
     for a in agents:
-        sid, cwd = a.get("sessionId", ""), a.get("cwd", "")
-        if not sid:
+        sid, cwd, pid = a.get("sessionId", ""), a.get("cwd", ""), a.get("pid")
+        if not sid or sid in seen:
             continue
+        if live and pid not in live:      # když se PIDy nepodaří zjistit, nefiltruj
+            continue
+        seen.add(sid)
         t = _transcript_path(cwd, sid)
         out.append({
-            "sid": sid, "cwd": cwd, "pid": a.get("pid"),
-            "topic": _display_name(sid, a.get("pid"), _topic(t) or a.get("name", "?")),
+            "sid": sid, "cwd": cwd, "pid": pid,
+            "topic": _display_name(sid, pid, _topic(t) or a.get("name", "?")),
             "age": _age(t),
         })
     return out
+
+
+def _live_claude_pids() -> set:
+    """PIDy skutečně běžících `claude.exe` procesů (interaktivní i resume). Prázdná
+    množina = nepodařilo se zjistit → volající pak filtr přeskočí (fail-open)."""
+    try:
+        out = _run(["ps", "-axo", "pid=,command="], 5)
+    except (subprocess.SubprocessError, OSError):
+        return set()
+    pids = set()
+    for line in out.splitlines():
+        line = line.strip()
+        if not line or "claude.exe" not in line:
+            continue
+        head = line.split(None, 1)[0]
+        try:
+            pids.add(int(head))
+        except ValueError:
+            pass
+    return pids
 
 
 def _transcript_path(cwd: str, sid: str) -> Path | None:
