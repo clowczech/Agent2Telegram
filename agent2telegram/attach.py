@@ -1077,7 +1077,7 @@ class AttachBridge:
         self._start_inbound_worker()
         self._replay_pending_inbound()   # clear the backlog first, then new messages
         offset = self._load_offset()
-        allowed_updates = json.dumps(["message", "edited_message", "message_reaction"])
+        allowed_updates = json.dumps(["message", "edited_message", "message_reaction", "callback_query"])
         transient_fails = 0
         outage_alerted = False
         while not self._stop.is_set():
