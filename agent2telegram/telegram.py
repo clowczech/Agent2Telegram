@@ -204,7 +204,8 @@ class TelegramClient:
         # Network timeout must exceed the long-poll timeout, else we'd cancel mid-poll.
         return self._call(
             "getUpdates",
-            {"offset": offset, "timeout": timeout, "allowed_updates": json.dumps(["message"])},
+            {"offset": offset, "timeout": timeout,
+             "allowed_updates": json.dumps(["message", "callback_query"])},
             timeout=timeout + 15,
         )
 
@@ -224,11 +225,14 @@ class TelegramClient:
                 self._backoff(attempt)
         raise TelegramError(f"download failed: {last}")
 
-    def send_plain_id(self, chat_id: int, text: str, *, parse_mode: str | None = None) -> int | None:
+    def send_plain_id(self, chat_id: int, text: str, *, parse_mode: str | None = None,
+                      reply_markup: dict | None = None) -> int | None:
         """Send a message and return its message_id (for editable status bubbles)."""
         params = {"chat_id": chat_id, "text": text, "disable_web_page_preview": "true"}
         if parse_mode:
             params["parse_mode"] = parse_mode
+        if reply_markup:
+            params["reply_markup"] = json.dumps(reply_markup)
         try:
             return self._call("sendMessage", params, timeout=SEND_TIMEOUT).get("message_id")
         except TelegramError:
@@ -246,6 +250,27 @@ class TelegramClient:
     def delete_message(self, chat_id: int, message_id: int) -> None:
         try:
             self._call("deleteMessage", {"chat_id": chat_id, "message_id": message_id}, timeout=SEND_TIMEOUT)
+        except TelegramError:
+            pass
+
+    def answer_callback_query(self, callback_query_id: str, text: str | None = None) -> None:
+        """ACK a button press so Telegram stops the client-side spinner."""
+        params: dict = {"callback_query_id": callback_query_id}
+        if text:
+            params["text"] = text
+        try:
+            self._call("answerCallbackQuery", params, timeout=SEND_TIMEOUT, retries=1)
+        except TelegramError:
+            pass  # cosmetic; the press itself is already in hand
+
+    def edit_reply_markup(self, chat_id: int, message_id: int,
+                          reply_markup: dict | None = None) -> None:
+        """Replace (or with ``None`` remove) a message's inline keyboard — used right after a
+        button press so a stale keyboard can't be pressed twice."""
+        params: dict = {"chat_id": chat_id, "message_id": message_id,
+                        "reply_markup": json.dumps(reply_markup or {"inline_keyboard": []})}
+        try:
+            self._call("editMessageReplyMarkup", params, timeout=SEND_TIMEOUT)
         except TelegramError:
             pass
 

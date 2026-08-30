@@ -32,6 +32,7 @@ from pathlib import Path
 
 from . import adapters
 from . import readers
+from . import switcher
 from . import tts
 from .compat import AlreadyRunning, single_instance_lock
 from .config import Config, _state_dir
@@ -107,6 +108,7 @@ BOT_COMMANDS = [
     {"command": "setkey", "description": "Enable voice (your ElevenLabs API key)"},
     {"command": "voice", "description": "Toggle spoken (voice-note) replies"},
     {"command": "id", "description": "Show your Telegram id"},
+    {"command": "bezi", "description": "Vypsat běžící Claude sessions a přepnout cíl"},
 ]
 
 #: Injected ahead of the user's message while voice mode is ON, so the AGENT writes a reply meant
@@ -1135,6 +1137,13 @@ class AttachBridge:
                     f"(a few words or an emoji), nothing more.")
             return True
 
+        cq = upd.get("callback_query")
+        if cq:
+            if cq.get("from", {}).get("id") not in self._allowed:
+                self.tg.answer_callback_query(cq.get("id", ""))
+                return True
+            return self._handle_callback(cq)
+
         msg = upd.get("message") or upd.get("edited_message")
         if not msg:
             return True
@@ -1279,6 +1288,14 @@ class AttachBridge:
         A write to tmux can fail transiently (busy pane, full buffer), so it is retried. When
         even the retries don't help, the user has to be told.
         """
+        rt = getattr(self, "_resume_target", None)
+        if rt is not None:
+            # Headless cíl: zpráva jde přes `claude -p --resume`, ne do tmuxu. Vlákno proto,
+            # aby dlouhý běh neblokoval inbound smyčku; typing drží _turn_active.
+            self._turn_active.set()
+            self._last_activity = time.monotonic()
+            threading.Thread(target=self._resume_worker, args=(text,), daemon=True).start()
+            return True
         self._turn_active.set()
         self._last_activity = time.monotonic()   # keep typing lit from the very start
         last_error: Exception | None = None
@@ -1367,16 +1384,112 @@ class AttachBridge:
         if cmd == "status":
             voice = "✓" if self.cfg.elevenlabs_api_key else "✗"
             replies = "🔊 on" if self._voice_reply_on() else "🔇 off"
+            rt = getattr(self, "_resume_target", None)
+            target = (f"headless session „{rt.topic or rt.sid[:8]}“ (přes --resume)" if rt
+                      else f"tmux session `{self.cfg.tmux_session}`")
             self.tg.send_message(chat_id,
-                f"✅ Connected — *{agent}* in tmux session `{self.cfg.tmux_session}`.\n"
+                f"✅ Connected — *{agent}* in {target}.\n"
                 f"🎤 Voice transcription (ElevenLabs): {voice}\n"
                 f"🗣️ Voice replies (/voice): {replies}")
             return True
+        if cmd in ("bezi", "skoc", "sessions"):
+            return self._cmd_bezi(chat_id)
         if cmd == "setkey":
             return self._set_voice_key(arg, chat_id, message_id)
         if cmd == "voice":
             return self._toggle_voice(chat_id)
         return False    # unknown command → let the agent handle it
+
+    # ---- session switching (fork addition) ------------------------------------
+    def _cmd_bezi(self, chat_id: int) -> bool:
+        """/bezi — list every running Claude Code session with one switch button each."""
+        if self.cfg.agent != "claude-code":
+            self.tg.send_message(chat_id, "Přepínání sessions umí jen Claude Code.")
+            return True
+        rows = switcher.running_sessions()
+        if not rows:
+            self.tg.send_message(chat_id, "Žádná Claude session neběží.")
+            return True
+        rt = getattr(self, "_resume_target", None)
+        lines, keyboard = [], []
+        for i, r in enumerate(rows, 1):
+            tmux_name = switcher.tmux_session_for_pid(r.get("pid"))
+            r["tmux"] = tmux_name
+            where = f"tmux:{tmux_name}" if tmux_name else "headless"
+            current = ((rt and r["sid"] == rt.sid) or
+                       (not rt and tmux_name == self.cfg.tmux_session))
+            mark = "▶ " if current else ""
+            cwd = r["cwd"].replace(str(Path.home()), "~")
+            lines.append(f"{mark}{i}) {r['topic']}  ·  {where}  ·  {r['age']}  ·  {cwd}")
+            keyboard.append([{"text": f"{mark}{i}) {r['topic']}",
+                              "callback_data": f"sw:{r['sid']}"}])
+        self.tg.send_plain_id(chat_id, "Běžící sessions — klepni, na kterou přepnout:\n"
+                              + "\n".join(lines), reply_markup={"inline_keyboard": keyboard})
+        return True
+
+    def _handle_callback(self, cq: dict) -> bool:
+        """A button press. ACK it fast, drop the stale keyboard, then act."""
+        data = cq.get("data", "") or ""
+        msg = cq.get("message", {}) or {}
+        chat_id = msg.get("chat", {}).get("id")
+        self.tg.answer_callback_query(cq.get("id", ""))
+        if data.startswith("sw:") and chat_id is not None:
+            self.tg.edit_reply_markup(chat_id, msg.get("message_id"))
+            self._switch_target(data[3:], chat_id)
+        return True
+
+    def _switch_target(self, sid: str, chat_id: int) -> None:
+        rows = switcher.running_sessions()
+        r = next((x for x in rows if x["sid"] == sid), None)
+        if r is None:
+            self.tg.send_message(chat_id, "Ta session už neběží — pošli /bezi znovu.")
+            return
+        tmux_name = switcher.tmux_session_for_pid(r.get("pid"))
+        if tmux_name:
+            # Živé připojení: stejný send-keys + transcript tail, jen jiný cíl.
+            try:
+                expected = _expected_agent_commands(self.cfg)
+                self._session = TmuxSession([], name=tmux_name, cwd=Path.home(),
+                                            origin_prefix=self.cfg.origin_prefix, boot_wait=0,
+                                            expected_agent_commands=expected)
+            except SessionError as e:
+                self.tg.send_message(chat_id, f"⚠️ Nejde se připojit: {e}")
+                return
+            self._resume_target = None
+            self.cfg.tmux_session = tmux_name
+            self._transcript = None
+            self._last_resolve = 0.0          # ať se transcript přepointuje hned
+            self.tg.send_message(chat_id,
+                f"✅ Přepnuto na *{r['topic']}* (tmux `{tmux_name}`). Piš — jdeš do živé session.")
+        else:
+            # Headless session (mobil / claude.ai): jede se přes --resume. Každá odpověď
+            # vzniká jako odbočka konverzace; navazující zprávy odbočku sledují dál.
+            self._resume_target = switcher.ResumeTarget(
+                sid, r["cwd"], r["topic"], timeout=self.cfg.agent_timeout)
+            self.tg.send_message(chat_id,
+                f"✅ Přepnuto na *{r['topic']}* (headless, přes --resume).\n"
+                "⚠️ Session zároveň drží appka — tvoje zprávy tady tvoří vlastní větev "
+                "konverzace se stejným kontextem.")
+
+    def _resume_worker(self, text: str) -> None:
+        """One headless exchange. Runs in its own thread; typing is lit while it works."""
+        rt = getattr(self, "_resume_target", None)
+        chat = self._owner_chat
+        if rt is None or chat is None:
+            self._turn_active.clear()
+            return
+        try:
+            reply = rt.send(text)
+            self.tg.send_message(chat, reply)
+        except Exception as e:
+            log.error("resume send failed: %s", e)
+            try:
+                self.tg.send_message(chat, f"⚠️ Odpověď se nepovedla ({e}). Zkus to znovu, "
+                                     "nebo /bezi a přepni cíl.")
+            except Exception:
+                pass
+        finally:
+            self._turn_active.clear()
 
     # ---- voice-reply mode ----------------------------------------------------
     def _load_voice_state(self) -> bool:
@@ -1683,16 +1796,20 @@ class AttachBridge:
     def _outbound_loop(self) -> None:
         while not self._stop.is_set():
             try:
+                in_resume = getattr(self, "_resume_target", None) is not None
                 self._maybe_reresolve()
                 self._flush_pending()         # re-deliver any reply a prior send failed to push
-                self._drain_transcript()      # may set _pending_turn_end (Codex task_complete)
-                self._drain_signal()
+                if not in_resume:
+                    self._drain_transcript()  # may set _pending_turn_end (Codex task_complete)
+                    self._drain_signal()
                 # End-of-turn detection, in priority order:
                 #   * Codex: the reader saw task_complete → end now (no hook needed).
                 #   * Claude Code: the Stop hook wrote the end-of-turn marker. Authoritative even
                 #     if turn_active is unset (e.g. a restart mid-turn that would orphan a bubble).
                 #   * Fallback: force-end if the transcript went quiet too long (hook missing).
-                if self._pending_turn_end:
+                if in_resume:
+                    pass                      # turn řídí _resume_worker, ne transcript
+                elif self._pending_turn_end:
                     zacatek = getattr(self, "_turn_begun_at", 0.0)
                     if zacatek and time.monotonic() - zacatek < SUSPICIOUS_TURN_SECONDS:
                         log.warning("turn ending after %.1fs — suspiciously fast, a stale "
