@@ -33,6 +33,41 @@ def _run(argv: list[str], timeout: float = 15) -> str:
     return res.stdout
 
 
+#: Vlastní evidence názvů (příkaz `pojmenuj`, klíč = sessionId) — má nejvyšší prioritu.
+_NAMES_STORE = Path.home() / ".claude" / "scripts" / "session-names.json"
+
+
+def _custom_names() -> dict:
+    try:
+        return json.loads(_NAMES_STORE.read_text("utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
+def _renamed_via_rename(pid) -> str:
+    """Název z /rename (~/.claude/sessions/<pid>.json). U přejmenované session klíč
+    `nameSource` úplně CHYBÍ (automatická má "derived") — testovat na != derived,
+    ne na pravdivost. Automatické tvary `<složka>-<2 hex>` ignorovat, nic neříkají."""
+    if not pid:
+        return ""
+    try:
+        d = json.loads((Path.home() / ".claude" / "sessions" / f"{pid}.json").read_text("utf-8"))
+    except (OSError, ValueError):
+        return ""
+    n = d.get("name") or ""
+    if not n or d.get("nameSource") == "derived" or re.search(r"-[0-9a-f]{2}$", n):
+        return ""
+    return n
+
+
+def _display_name(sid: str, pid, fallback: str) -> str:
+    """Jméno pro /bezi a /hist: pojmenuj > /rename > první zpráva konverzace.
+    Jan si sessions přejmenovává a seznam bez těch názvů nedával smysl (30. 8.)."""
+    return (_custom_names().get(sid)
+            or _renamed_via_rename(pid)
+            or fallback)
+
+
 def running_sessions() -> list[dict]:
     """Every running Claude Code session: sessionId, cwd, pid, topic, age.
 
@@ -52,7 +87,7 @@ def running_sessions() -> list[dict]:
         t = _transcript_path(cwd, sid)
         out.append({
             "sid": sid, "cwd": cwd, "pid": a.get("pid"),
-            "topic": _topic(t) or a.get("name", "?"),
+            "topic": _display_name(sid, a.get("pid"), _topic(t) or a.get("name", "?")),
             "age": _age(t),
         })
     return out
@@ -152,8 +187,12 @@ class ResumeTarget:
         self.timeout = timeout
 
     def send(self, prompt: str) -> str:
+        # --permission-mode auto: bez něj se telegramová větev chovala jako „návštěva" —
+        # zápis do repa i vaultu čekal na schválení, které v headless běhu nemá kdo dát.
+        # Janovo výslovné rozhodnutí 30. 8. 2026: větev má mít stejná práva jako rc wrapper
+        # a tmux session (obě `--permission-mode auto` už mají).
         argv = ["claude", "-p", "--resume", self.sid, prompt,
-                "--output-format", "json"]
+                "--output-format", "json", "--permission-mode", "auto"]
         proc = subprocess.run(argv, cwd=self.cwd, capture_output=True, text=True,
                               timeout=self.timeout, stdin=subprocess.DEVNULL)
         out = (proc.stdout or "").strip()
@@ -256,7 +295,8 @@ def recent_ended_sessions(n: int = 8, base: Path | None = None) -> list[dict]:
             continue
         cwd = _first_cwd(f)
         out.append({"sid": sid, "cwd": cwd or str(Path.home()),
-                    "topic": _topic(f) or "(bez tématu)", "age": _age(f), "pid": None})
+                    "topic": _display_name(sid, None, _topic(f) or "(bez tématu)"),
+                    "age": _age(f), "pid": None})
         if len(out) >= n:
             break
     return out
@@ -268,7 +308,8 @@ def session_from_disk(sid: str, base: Path | None = None) -> dict | None:
     for f in base.glob(f"*/{sid}.jsonl"):
         cwd = _first_cwd(f)
         return {"sid": sid, "cwd": cwd or str(Path.home()),
-                "topic": _topic(f) or "(bez tématu)", "age": _age(f), "pid": None}
+                "topic": _display_name(sid, None, _topic(f) or "(bez tématu)"),
+                "age": _age(f), "pid": None}
     return None
 
 
