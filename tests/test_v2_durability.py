@@ -530,48 +530,50 @@ class OutboxBlockingTests(unittest.TestCase):
 
 
 class LiveRetryTests(unittest.TestCase):
-    def test_undelivered_message_is_retried_without_a_restart(self):
-        """An undelivered message must be retried WHILE RUNNING, not only after a restart.
+    def test_gone_session_shuts_down_and_message_survives_the_restart(self):
+        """A GONE tmux session ends the bridge; the stored message is replayed after restart.
 
-        Found in review: delivery of stored messages lived only in the startup path. For a service
-        that runs for weeks that means "practically never" — the message would wait for the next
-        crash or update.
+        Since 0597ccc the bridge deliberately exits when the tmux session no longer exists —
+        under launchd the supervisor restarts it, the launcher recreates the session, and the
+        durable inbox replays the message. The invariant under test stays the same as before
+        the change: the message must never be lost.
         """
         with tempfile.TemporaryDirectory() as td:
-            class _DeadThenAlive:
-                """A tmux that wakes up after a while — like a frozen pane coming back."""
+            class _Gone:
+                """The tmux session no longer exists at all (reboot, window closed)."""
+                alive = False
                 def __init__(self):
                     self.injected = []
-                    self.alive = False
-
                 def inject(self, text):
-                    if not self.alive:
-                        raise SessionError("tmux send-keys timed out")
-                    self.injected.append(text)
+                    raise SessionError("tmux session 'a2t' does not exist")
 
-            session = _DeadThenAlive()
+            session = _Gone()
             b = _bridge(td, session=session)
             b._ensure_inbound_worker_state()
 
             b._handle_update_once(_msg(5000, "deliver me later"), 5000)
-            for _ in range(60):
-                if not b._inbound_inflight():
+            for _ in range(150):
+                if b._stop.is_set():
                     break
                 time.sleep(0.02)
-            self.assertFalse(session.injected, "the message should not have been delivered — tmux was dead")
-            self.assertTrue(list(Path(td).glob("inbox/*")), "the message was not stored for a retry")
+            self.assertFalse(session.injected, "the message should not have been delivered — tmux was gone")
+            self.assertTrue(b._stop.is_set(), "a gone session must end the bridge so launchd can recreate it")
+            self.assertTrue(list(Path(td).glob("inbox/*")), "the message was not stored for the restart")
 
-            session.alive = True         # the pane woke up, WITHOUT restarting the bridge
-            b._replay_pending_inbound()
+            # "Restart": a fresh bridge over the SAME state dir, session recreated by the launcher.
+            session2 = _OkSession()
+            b2 = _bridge(td, session=session2)
+            b2._ensure_inbound_worker_state()
+            b2._replay_pending_inbound()
             for _ in range(100):
-                if session.injected:
+                if session2.injected:
                     break
                 time.sleep(0.02)
-            b._stop.set()
+            b2._stop.set()
             time.sleep(0.3)
 
-            self.assertTrue(session.injected, "the message was never retried while running")
-            self.assertIn("deliver me later", "\n".join(session.injected))
+            self.assertTrue(session2.injected, "the stored message was not replayed after the restart")
+            self.assertIn("deliver me later", "\n".join(session2.injected))
 
     def test_live_retry_does_not_deliver_the_same_message_twice(self):
         """A retry must not queue the same message a second time while it is being processed."""
