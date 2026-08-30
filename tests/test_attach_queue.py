@@ -5,7 +5,10 @@ import threading
 import unittest
 from pathlib import Path
 
+from unittest import mock
+
 from agent2telegram import attach as attach_mod
+from agent2telegram.session import SessionError
 from agent2telegram import stt
 from agent2telegram.attach import (
     AttachBridge,
@@ -503,3 +506,41 @@ class ReactionDedupTests(unittest.TestCase):
         for i in range(700):
             b._handle(self._upd(i, msg_id=i))
         self.assertLessEqual(len(b._reaction_seen), 512)
+
+
+class DeadTmuxSessionTests(unittest.TestCase):
+    """When the tmux session itself is gone, the bridge must exit so the supervisor
+    (launchd KeepAlive) can recreate it — not refuse every message forever."""
+
+    def _dying_bridge(self):
+        b = _bridge()
+
+        class _GoneSession(_FakeSession):
+            alive = False
+
+            def inject(self, text):
+                raise SessionError("agent session 'telegram' is gone")
+
+        b._session = _GoneSession()
+        return b
+
+    def test_gone_session_stops_the_bridge(self):
+        b = self._dying_bridge()
+        with mock.patch.object(attach_mod, "INJECT_RETRY_WAIT", 0):
+            b._handle(_message("hello"))
+        self.assertTrue(b._stop.is_set())
+
+    def test_crashed_pane_does_not_stop_the_bridge(self):
+        # A pane that fell back to a shell is the SAFETY stop (injecting would run the message
+        # as a shell command) — the bridge must stay up and warn, not exit-loop via launchd.
+        b = _bridge()
+
+        class _ShellPane(_FakeSession):
+            alive = True
+
+            def inject(self, text):
+                raise SessionError("refusing to inject into tmux session 'telegram': pane runs zsh")
+
+        b._session = _ShellPane()
+        b._handle(_message("hello"))
+        self.assertFalse(b._stop.is_set())

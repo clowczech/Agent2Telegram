@@ -1357,6 +1357,19 @@ class AttachBridge:
                 self._stop.wait(INJECT_RETRY_WAIT)
         log.error("inject failed after %d attempts: %s", INJECT_ATTEMPTS, last_error)
         self._turn_active.clear()
+        if getattr(self._session, "alive", True) is False:
+            # Only when the session is KNOWN to be gone — a frozen pane (send-keys timeout, full
+            # buffer) stays on the notify path below; exiting must be the exception.
+            # The tmux session itself is GONE (window closed, machine rebooted the server, the
+            # agent quit) — no retry from here can bring it back. Under launchd the supervisor
+            # restarts us and the launcher recreates the session, and the durable inbox replays
+            # this very message into it, so exiting IS the recovery. A bare manual run just ends
+            # with this log line instead of refusing every message forever.
+            log.error("tmux session '%s' is gone → shutting down so the supervisor can "
+                      "recreate it (the message stays queued and is replayed on restart)",
+                      self.cfg.tmux_session)
+            self._stop.set()
+            return False
         self._notify_inject_failed(text, str(last_error))
         return False
 
