@@ -311,3 +311,32 @@ class BackstopDedupTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class BridgeCommandRecognitionTests(unittest.TestCase):
+    """A command must be recognised even when a short greeting comes before it."""
+
+    def test_command_opening_the_message_is_taken_whole(self):
+        self.assertEqual(attach_mod._bridge_command("/setkey abc123"), "/setkey abc123")
+        self.assertEqual(attach_mod._bridge_command("/status@some_bot"), "/status@some_bot")
+
+    def test_short_message_ending_in_a_known_command(self):
+        # The exact message that silently went to the agent instead of listing sessions.
+        self.assertEqual(attach_mod._bridge_command("Aha tady. Tak /bezi"), "/bezi")
+        self.assertEqual(attach_mod._bridge_command("a ted /skoc"), "/skoc")
+
+    def test_unknown_trailing_command_goes_to_the_agent(self):
+        self.assertIsNone(attach_mod._bridge_command("zkus /rekonstrukce"))
+
+    def test_long_message_about_a_command_goes_to_the_agent(self):
+        text = "do README pridej odstavec o tom, co dela prikaz /bezi a jak se pouziva"
+        self.assertGreater(len(text), attach_mod.MAX_TRAILING_COMMAND_CHARS)
+        self.assertIsNone(attach_mod._bridge_command(text))
+
+    def test_command_mid_sentence_goes_to_the_agent(self):
+        self.assertIsNone(attach_mod._bridge_command("/bezi ma vypsat sessions"[1:]))
+        self.assertIsNone(attach_mod._bridge_command("prikaz /bezi vypise sessions"))
+
+    def test_plain_text_and_empty_are_not_commands(self):
+        self.assertIsNone(attach_mod._bridge_command("ahoj"))
+        self.assertIsNone(attach_mod._bridge_command(""))

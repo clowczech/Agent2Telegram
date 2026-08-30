@@ -149,6 +149,29 @@ _TUI_VERBS = {"Read": "📄", "List": "📂", "Search": "🔎", "Ran": "🛠️"
               "Deleted": "🗑️", "Removed": "🗑️"}
 
 
+def _bridge_command(text: str) -> str | None:
+    """Return the slash command the bridge should answer itself, or None to forward the message.
+
+    A command that opens the message is taken as written, argument and all — that is what Telegram
+    means by a command. But a short message ENDING in a known bridge command counts too: Jan sent
+    "Aha tady. Tak /bezi", the whole thing went to the agent, and the session list never appeared.
+    Only known commands qualify, and only as the last word of a short message, so writing *about*
+    the bridge ("přidej do README /bezi") still reaches the agent instead of firing a switch menu.
+    """
+    if not text:
+        return None
+    if text.startswith("/"):
+        return text
+    if len(text) > MAX_TRAILING_COMMAND_CHARS:
+        return None
+    last = text.split()[-1]
+    if not last.startswith("/"):
+        return None
+    if last.lstrip("/").split("@")[0].lower() in BRIDGE_COMMANDS:
+        return last
+    return None
+
+
 def _extract_tui_tools(pane: str) -> list:
     """Pull live tool/web-search lines out of a Codex TUI capture, as bubble summaries."""
     out = []
