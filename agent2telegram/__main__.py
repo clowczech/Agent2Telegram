@@ -58,6 +58,35 @@ def _cmd_run(args) -> int:
     return 0
 
 
+def _record_notify_origin(cfg, args, mids, text) -> None:
+    """Zapis puvod notifikace, aby na ni slo v Telegramu ODPOVEDET a odpoved dostal autor.
+
+    Session odesilatele se pozna sama: notify bezi jako potomek Bash toolu te session,
+    takze staci projit ppid retez (switcher.session_for_ancestor). Explicitni --sid ma
+    prednost; kdyz se autor nenajde, zaznam se proste nezapise a reply jde
+    aktualnimu cili mostu — stejne chovani jako pred touto funkci.
+    """
+    if not mids:
+        return
+    try:
+        from . import origins, switcher
+        from .config import _state_dir
+        sid = getattr(args, "sid", None) or ""
+        cwd = getattr(args, "cwd", None) or ""
+        label = getattr(args, "label", None) or ""
+        if not sid:
+            import os
+            a = switcher.session_for_ancestor(os.getpid()) or {}
+            sid, cwd = a.get("sid", ""), cwd or a.get("cwd", "")
+            label = label or a.get("topic", "")
+        if not label:
+            label = (text or "").strip().splitlines()[0][:40] if text else ""
+        if sid:
+            origins.record(_state_dir(cfg), mids, sid=sid, cwd=cwd, label=label)
+    except Exception as e:
+        print(f"(origin not recorded: {e})", file=sys.stderr)
+
+
 def _cmd_notify(args) -> int:
     """Push a message to the configured owner via the bot — for PROACTIVE notifications from
     cron jobs, background tasks or scripts (e.g. "build finished ✅"). This is the supported way
@@ -88,7 +117,8 @@ def _cmd_notify(args) -> int:
     owner = cfg.allowed_user_ids[0]
     try:
         if text:
-            client.send_message(owner, text)
+            mids = client.send_message(owner, text)
+            _record_notify_origin(cfg, args, mids, text)
             print("✓ sent")
     except TelegramError as e:
         print(f"✗ send failed: {e}", file=sys.stderr)
@@ -241,6 +271,9 @@ def main(argv: list[str] | None = None) -> int:
     nt.add_argument("--config", help="path to a specific bridge config")
     nt.add_argument("--file", action="append",
                     help="attach a file from an outbox folder (repeatable)")
+    nt.add_argument("--sid", help="originating Claude session id (default: auto-detect via process tree)")
+    nt.add_argument("--cwd", help="originating session cwd (for reply routing)")
+    nt.add_argument("--label", help="short origin name shown when a reply is routed back")
     sub.add_parser("service", help="print a systemd/launchd service unit")
     sub.add_parser("doctor", help="diagnose config and agent availability")
     st = sub.add_parser("selftest", help="end-to-end attach test against a real agent (no bot)")

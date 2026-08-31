@@ -175,6 +175,31 @@ def _age(path: Path | None) -> str:
 
 
 # ---------------------------------------------------------------- pid -> tmux session
+def session_for_ancestor(pid: int | None) -> dict | None:
+    """The running Claude session this process tree hangs under, or None.
+
+    Walks the ppid chain from *pid* upward and returns the first ancestor that is a live
+    Claude session (per ``claude agents --json``). This is how ``notify`` finds out WHICH
+    session sent a notification without the caller passing anything: the notify CLI runs
+    as a child of the session's Bash tool, so its ancestry leads straight to the session.
+    """
+    if not pid:
+        return None
+    rows = {r.get("pid"): r for r in running_sessions() if r.get("pid")}
+    cur = pid
+    for _ in range(40):                       # bounded — a process tree is never this deep
+        if cur in rows:
+            return rows[cur]
+        try:
+            out = _run(["ps", "-o", "ppid=", "-p", str(cur)], timeout=5).strip()
+            cur = int(out)
+        except (subprocess.SubprocessError, OSError, ValueError):
+            return None
+        if cur <= 1:
+            return None
+    return None
+
+
 def tmux_session_for_pid(pid: int | None) -> str | None:
     """Name of the tmux session whose pane subtree contains *pid* — i.e. the session the
     agent actually runs in. None when the agent is headless (mobile app, claude.ai)."""

@@ -31,6 +31,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 from . import adapters
+from . import origins
 from . import readers
 from . import switcher
 from . import tts
@@ -898,11 +899,12 @@ class AttachBridge:
             # Parts already confirmed by Telegram are NOT resent — only the remaining ones.
             for index, chunk in rec.pending_chunks:
                 try:
-                    self.tg.send_message(self._owner_chat, chunk)
+                    mids = self.tg.send_message(self._owner_chat, chunk)
                 except Exception as e:
                     log.warning("delivery of part %d still failing: %s", index, e)
                     return
                 outbox.mark_chunk_sent(rec.record_id, index)
+                self._record_origin(mids)
             vzdano = False
             for file_path in rec.pending_files:
                 try:
@@ -1227,6 +1229,8 @@ class AttachBridge:
                 return True
             text = f"{text}\n{note}".strip()
         if text:
+            if self._maybe_route_reply(msg, text, chat_id):
+                return True
             text = self._prepend_reply_context(msg, text)
             if self._voice_reply_on():
                 # Tell the agent to write for the EAR, not the eye. This is the core of voice
@@ -1254,6 +1258,91 @@ class AttachBridge:
         if len(quote) > REPLY_QUOTE_CHARS:
             quote = quote[:REPLY_QUOTE_CHARS] + "…"
         return f"[replying to: {quote}]\n{text}"
+
+    # ---- reply routing (fork addition) ----------------------------------------
+    def _current_target_sid(self) -> str:
+        """Session id zprava od Jana normalne skonci v: resume cil, jinak tmux pane."""
+        rt = getattr(self, "_resume_target", None)
+        if rt is not None:
+            return rt.sid
+        a = switcher.agent_for_tmux(self.cfg.tmux_session) or {}
+        return a.get("sid", "")
+
+    def _record_origin(self, mids, *, sid: str = "", cwd: str = "", label: str = "") -> None:
+        """Zapamatuj, ze prave odeslane zpravy pochazeji z dane session (pro reply routing).
+        Bez argumentu se pouzije AKTUALNI cil mostu. Best-effort — nesmi shodit odeslani."""
+        if not mids:
+            return
+        try:
+            if not sid:
+                rt = getattr(self, "_resume_target", None)
+                if rt is not None:
+                    sid, cwd, label = rt.sid, rt.cwd, rt.topic or ""
+                else:
+                    a = switcher.agent_for_tmux(self.cfg.tmux_session) or {}
+                    sid, cwd = a.get("sid", ""), a.get("cwd", "")
+                    label = label or self.cfg.tmux_session
+            origins.record(_state_dir(self.cfg), mids, sid=sid, cwd=cwd, label=label)
+        except Exception as e:
+            log.warning("origin record failed: %s", e)
+
+    def _maybe_route_reply(self, msg: dict, text: str, chat_id: int) -> bool:
+        """Odpoved na zpravu JINE session doruc te session, ne aktualnimu cili.
+
+        Kazda odchozi zprava ma v origins ulozeno, ktera session ji poslala. Kdyz Jan
+        na nejakou ODPOVI (reply) a autorem neni aktualni cil, zprava se vyridi pres
+        ``claude -p --resume`` u autora — hlaska hlidace tak jde vyridit primo hlidaci.
+        Vraci True, kdyz byla zprava predana; False = bezny tok (vcetne reply na
+        zpravy bez zaznamu — stare, cizi, nebo od aktualniho cile).
+        """
+        replied = msg.get("reply_to_message") or {}
+        mid = replied.get("message_id")
+        if not mid:
+            return False
+        try:
+            origin = origins.lookup(_state_dir(self.cfg), mid)
+        except Exception:
+            return False
+        if not origin or origin.get("sid") == self._current_target_sid():
+            return False
+        threading.Thread(target=self._routed_reply_worker,
+                         args=(origin, msg, text, chat_id), daemon=True).start()
+        return True
+
+    def _routed_reply_worker(self, origin: dict, msg: dict, text: str, chat_id: int) -> None:
+        """Jedna vymena s autorskou session. Vlastni vlakno — nesmi blokovat inbound ani
+        sahat na _turn_active (hlavni cil muze mit soubezne rozjety vlastni tah)."""
+        label = origin.get("label") or origin.get("sid", "")[:8]
+        try:
+            self.tg.send_message(chat_id, f"↪ Předávám session „{label}“…")
+            self.tg.send_chat_action(chat_id, "typing")
+        except Exception:
+            pass
+        prompt = ("[Zpráva z Telegramu: uživatel ODPOVÍDÁ na tvou dřívější zprávu níže. "
+                  "Odpověď se mu doručí do Telegramu — jednej/odpověz přímo a stručně.]" "\n"
+                  + self._prepend_reply_context(msg, text))
+        try:
+            rt = switcher.ResumeTarget(origin["sid"], origin.get("cwd", ""), topic=label,
+                                       timeout=self.cfg.agent_timeout)
+            reply = rt.send(prompt)
+        except Exception as e:
+            log.error("routed reply to %s failed: %s", origin.get("sid", "")[:8], e)
+            try:
+                self.tg.send_message(chat_id,
+                    f"⚠️ Session „{label}“ se nepodařilo zastihnout ({e}). "
+                    "Pošli zprávu znovu bez odpovědi (vyřídí ji aktuální session), "
+                    "nebo /bezi a přepni.")
+            except Exception:
+                pass
+            return
+        log.info("FWD (routed) sid=%s %r", rt.sid[:8], reply[:40])
+        try:
+            mids = self.tg.send_message(chat_id, f"↪ {label}:\n{reply}")
+        except Exception as e:
+            log.error("routed reply delivery failed: %s", e)
+            return
+        # dalsi reply na TUHLE odpoved pokracuje u stejneho autora (vcetne fork-follow)
+        self._record_origin(mids, sid=rt.sid, cwd=rt.cwd, label=label)
 
     def _maybe_ack_queued(self, upd: dict) -> None:
         """Acknowledge a message that arrived while work was already in progress.
@@ -1661,7 +1750,8 @@ class AttachBridge:
             reply = rt.send(prompt)
             self._save_resume_target()       # sid se mohl posunout (fork-follow)
             log.info("FWD (resume) sid=%s %r", rt.sid[:8], reply[:40])
-            self.tg.send_message(chat, reply)
+            mids = self.tg.send_message(chat, reply)
+            self._record_origin(mids, sid=rt.sid, cwd=rt.cwd, label=rt.topic or "")
         except Exception as e:
             log.error("resume send failed: %s", e)
             try:

@@ -410,23 +410,30 @@ class TelegramClient:
                              os.path.basename(path), payload)
         log.info("sent voice note (%d bytes)", len(payload))
 
-    def send_message(self, chat_id: int, text: str, *, parse_mode: str = "auto") -> None:
+    def send_message(self, chat_id: int, text: str, *, parse_mode: str = "auto") -> list:
         """Send text, splitting to Telegram's size limit. By default (``parse_mode="auto"``)
         the agent's Markdown is rendered via HTML; on any parse failure we fall back to plain
-        text so a message is never lost to a formatting glitch."""
+        text so a message is never lost to a formatting glitch.
+
+        Returns the Telegram message_id of every part sent — reply routing records them as
+        origins. Callers that don't care simply ignore the return value."""
+        mids = []
         for chunk in split_message(text) or ["(empty response)"]:
             base = {"chat_id": chat_id, "disable_web_page_preview": "true"}
             if parse_mode == "auto":
                 try:
-                    self._call("sendMessage", {**base, "text": markdown_to_html(chunk), "parse_mode": "HTML"}, timeout=SEND_TIMEOUT)
+                    r = self._call("sendMessage", {**base, "text": markdown_to_html(chunk), "parse_mode": "HTML"}, timeout=SEND_TIMEOUT)
                 except TelegramError as e:
                     log.warning("HTML send failed, falling back to plain text: %s", e)
-                    self._call("sendMessage", {**base, "text": _strip_markdown(chunk)}, timeout=SEND_TIMEOUT)
+                    r = self._call("sendMessage", {**base, "text": _strip_markdown(chunk)}, timeout=SEND_TIMEOUT)
             elif parse_mode:
                 try:
-                    self._call("sendMessage", {**base, "text": chunk, "parse_mode": parse_mode}, timeout=SEND_TIMEOUT)
+                    r = self._call("sendMessage", {**base, "text": chunk, "parse_mode": parse_mode}, timeout=SEND_TIMEOUT)
                 except TelegramError as e:
                     log.warning("send failed with parse_mode=%s, retrying plain: %s", parse_mode, e)
-                    self._call("sendMessage", {**base, "text": chunk}, timeout=SEND_TIMEOUT)
+                    r = self._call("sendMessage", {**base, "text": chunk}, timeout=SEND_TIMEOUT)
             else:
-                self._call("sendMessage", {**base, "text": chunk}, timeout=SEND_TIMEOUT)
+                r = self._call("sendMessage", {**base, "text": chunk}, timeout=SEND_TIMEOUT)
+            if isinstance(r, dict) and r.get("message_id"):
+                mids.append(r["message_id"])
+        return mids
