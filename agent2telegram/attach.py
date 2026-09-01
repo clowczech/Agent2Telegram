@@ -102,21 +102,31 @@ MAX_AUDIO_BYTES = 25 * 1024 * 1024
 MAX_INBOUND_PROMPT_CHARS = 12_000
 
 #: Registered with Telegram (setMyCommands) so typing "/" shows the command autocomplete menu.
+#: Pořadí = pořadí v nabídce po napsání „/“, proto nahoře to, co Jan používá denně.
+#: Názvy i popisky se drží terminálových příkazů (`bezi`, `obnov`, `pojmenuj`, …), aby se
+#: nebylo potřeba učit dvojí slovník — vault: Pocitac (navody&nastavení)/Terminál/.
 BOT_COMMANDS = [
-    {"command": "start", "description": "Intro and what you can send"},
-    {"command": "help", "description": "Intro and what you can send"},
-    {"command": "status", "description": "Connection and voice status"},
-    {"command": "setkey", "description": "Enable voice (your ElevenLabs API key)"},
-    {"command": "voice", "description": "Toggle spoken (voice-note) replies"},
-    {"command": "id", "description": "Show your Telegram id"},
-    {"command": "bezi", "description": "Vypsat běžící Claude sessions a přepnout cíl"},
-    {"command": "hist", "description": "Ukončené konverzace — klepnutím oživit"},
+    {"command": "bezi", "description": "Běžící sessions — klepnutím přepneš cíl"},
+    {"command": "obnov", "description": "Ukončené konverzace — klepnutím oživíš"},
+    {"command": "hist", "description": "Totéž co /obnov — historie konverzací"},
     {"command": "zavri", "description": "Ukončit session — zmizí z /bezi"},
+    {"command": "pojmenuj", "description": "Pojmenovat session: /pojmenuj 3 Fringe"},
+    {"command": "recap", "description": "Kde to stojí — hotové, co visí na tobě"},
+    {"command": "ceka", "description": "Co čeká na potvrzení — nálezy, rutiny, sliby"},
+    {"command": "hledej", "description": "Významové hledání ve vaultu i v paměti"},
+    {"command": "status", "description": "Na čem stojím a stav hlasu"},
+    {"command": "voice", "description": "Mluvené odpovědi zapnout/vypnout"},
+    {"command": "setkey", "description": "Zapnout hlas (klíč k ElevenLabs)"},
+    {"command": "id", "description": "Ukázat tvoje Telegram id"},
+    {"command": "help", "description": "Co všechno sem můžeš poslat"},
+    {"command": "start", "description": "Co všechno sem můžeš poslat"},
 ]
 
 #: Every command the bridge answers itself, including the aliases missing from BOT_COMMANDS.
 #: Used to recognise a command that does not open the message — see `_bridge_command`.
-BRIDGE_COMMANDS = {c["command"] for c in BOT_COMMANDS} | {"skoc", "sessions", "zavrit"}
+#: `recap` je v nabídce, ale most ho NEobsluhuje: propadne agentovi, který má stejnojmenný skill.
+BRIDGE_COMMANDS = ({c["command"] for c in BOT_COMMANDS}
+                   | {"skoc", "sessions", "zavrit", "historie"}) - {"recap"}
 
 #: A trailing command is only honoured in a message this short. Long enough for "Aha tady. Tak
 #: /bezi", short enough that a sentence *about* the bridge still reaches the agent.
@@ -1525,7 +1535,9 @@ class AttachBridge:
                 "progress, what tools it runs, and the reply. You can also send *photos* and "
                 "*files*, and react with ❤️ as quick feedback.\n\n"
                 f"🎤 Voice transcription: {voice}.\n\n"
-                "Commands: /help · /status · /id · /setkey · /voice")
+                "Sessions: /bezi · /obnov · /zavri · /pojmenuj\n"
+                "Přehled: /recap · /ceka · /hledej <dotaz>\n"
+                "Ostatní: /status · /voice · /setkey · /id")
             return True
         if cmd == "id":
             self.tg.send_message(chat_id, f"Your Telegram id: `{chat_id}`")
@@ -1545,10 +1557,14 @@ class AttachBridge:
             return True
         if cmd in ("bezi", "skoc", "sessions"):
             return self._cmd_bezi(chat_id)
-        if cmd in ("hist", "historie"):
+        if cmd in ("hist", "historie", "obnov"):
             return self._cmd_hist(chat_id)
         if cmd in ("zavri", "zavrit"):
             return self._cmd_zavri(chat_id)
+        if cmd == "pojmenuj":
+            return self._cmd_pojmenuj(arg, chat_id)
+        if cmd in ("hledej", "ceka"):
+            return self._cmd_nastroj(cmd, arg, chat_id)
         if cmd == "setkey":
             return self._set_voice_key(arg, chat_id, message_id)
         if cmd == "voice":
@@ -1630,6 +1646,69 @@ class AttachBridge:
         self.tg.send_plain_id(chat_id, "Co ukončit? (transcript zůstane, /hist ji oživí)\n"
                               + "\n".join(lines), reply_markup={"inline_keyboard": keyboard})
         return True
+
+    def _cmd_pojmenuj(self, arg: str, chat_id: int) -> bool:
+        """/pojmenuj <číslo z /bezi> <název> — stejné pojmenování jako v terminálu.
+
+        Číslo se bere z aktuálního /bezi (most má vlastní číslování), ale zápis dělá
+        `sessions.py name sid:<sid>` — tedy týž kód jako terminálový `pojmenuj`, aby
+        jméno skončilo i v ~/.claude/sessions a v transcriptu, ne jen v evidenci mostu.
+        """
+        if self.cfg.agent != "claude-code":
+            self.tg.send_message(chat_id, "Pojmenování sessions umí jen Claude Code.")
+            return True
+        rows = switcher.running_sessions()
+        parts = arg.split(maxsplit=1)
+        if len(parts) < 2 or not parts[0].isdigit():
+            lines = [f"{i}) {r['topic']}" for i, r in enumerate(rows, 1)]
+            self.tg.send_plain_id(chat_id, "Použití: /pojmenuj <číslo z /bezi> <název>\n"
+                                  + ("\n".join(lines) or "Žádná session neběží."))
+            return True
+        idx, nazev = int(parts[0]), parts[1].strip()
+        if not 1 <= idx <= len(rows):
+            self.tg.send_message(chat_id, f"V /bezi číslo {idx} není — sessions je {len(rows)}.")
+            return True
+        row = rows[idx - 1]
+        try:
+            out = subprocess.run(
+                ["python3", str(Path.home() / ".claude" / "scripts" / "sessions.py"),
+                 "name", f"sid:{row['sid']}", nazev],
+                capture_output=True, text=True, timeout=30).stdout.strip()
+        except (subprocess.SubprocessError, OSError) as e:
+            self.tg.send_message(chat_id, f"⚠️ Nepovedlo se pojmenovat: {e}")
+            return True
+        self.tg.send_plain_id(chat_id, f"✏️ {idx}) {row['topic']} → „{nazev}“\n{out}")
+        return True
+
+    #: Čtecí nástroje z terminálu, které most spustí sám — nic nemění, tak nemusí přes agenta.
+    def _nastroj_argv(self, cmd: str, arg: str) -> list[str]:
+        if cmd == "ceka":
+            return ["python3", str(Path.home() / ".claude" / "scripts" / "ceka.py")]
+        return [str(Path.home() / "Podcast" / "venv" / "bin" / "python"),
+                str(Path.home() / "VaultIndex" / "indexer.py"), "hledej", arg, "8"]
+
+    def _cmd_nastroj(self, cmd: str, arg: str, chat_id: int) -> bool:
+        """/ceka a /hledej — pustí týž skript jako terminál a pošle výpis."""
+        if cmd == "hledej" and not arg:
+            self.tg.send_message(chat_id, "Použití: /hledej <co hledat> — vault, paměť i konverzace.")
+            return True
+        threading.Thread(target=self._nastroj_worker, args=(cmd, arg, chat_id),
+                         daemon=True).start()
+        return True
+
+    def _nastroj_worker(self, cmd: str, arg: str, chat_id: int) -> None:
+        try:
+            self.tg.send_chat_action(chat_id)
+        except Exception as e:                      # noqa: BLE001 — kosmetika, nikdy neblokovat
+            log.debug("chat action failed: %s", e)
+        try:
+            res = subprocess.run(self._nastroj_argv(cmd, arg),
+                                 capture_output=True, text=True, timeout=180)
+            out = (res.stdout or res.stderr or "").strip()
+        except Exception as e:                      # noqa: BLE001 — hlásit, ne spadnout
+            log.warning("/%s failed: %s", cmd, e)
+            out = f"⚠️ /{cmd} se nepovedlo spustit: {e}"
+        self.tg.send_plain_id(chat_id, out[:3500] or "(nic nenalezeno)")
 
     def _close_target(self, sid: str, chat_id: int) -> None:
         rows = switcher.running_sessions()

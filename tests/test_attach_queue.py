@@ -33,6 +33,10 @@ class _FakeClient:
     def send_message(self, chat_id, text, parse_mode=None):
         self.sent.append((chat_id, text))
 
+    def send_plain_id(self, chat_id, text, *, parse_mode=None, reply_markup=None):
+        self.sent.append((chat_id, text))
+        return [1]
+
     def delete_message(self, chat_id, message_id):
         self.deleted.append((chat_id, message_id))
 
