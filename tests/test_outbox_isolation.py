@@ -10,6 +10,7 @@ holds that guarantee instead.
 """
 import os
 import unittest
+from unittest import mock
 from pathlib import Path
 
 from agent2telegram import attach
@@ -24,10 +25,13 @@ class _FakeBridge:
 
 
 class OutboxIsolationTests(unittest.TestCase):
+    # tests/__init__.py od 2. 9. 2026 izoluje CELOU sadu přes AGENT2TELEGRAM_STATE (tempdir).
+    # Tyhle dva testy hlídají brzdu pro případ, že by izolace chyběla — proto ji tu schválně sundají.
     def test_test_run_without_isolated_queue_gets_no_outbox(self):
         self.assertTrue(attach._in_test_run(), "a test run must recognise itself")
-        self.assertIsNone(_FakeBridge()._ensure_outbox(),
-                          "a test without an isolated queue reached the real outbox")
+        with mock.patch.dict(os.environ, {"AGENT2TELEGRAM_STATE": ""}):
+            self.assertIsNone(_FakeBridge()._ensure_outbox(),
+                              "a test without an isolated queue reached the real outbox")
 
     def test_the_guard_holds_under_every_runner_not_just_pytest(self):
         """The project's CI runs `python -m unittest discover`, where PYTEST_CURRENT_TEST does
@@ -37,7 +41,8 @@ class OutboxIsolationTests(unittest.TestCase):
         try:
             self.assertTrue(attach._in_test_run(),
                             "without PYTEST_CURRENT_TEST the run is no longer recognised as a test")
-            self.assertIsNone(_FakeBridge()._ensure_outbox())
+            with mock.patch.dict(os.environ, {"AGENT2TELEGRAM_STATE": ""}):
+                self.assertIsNone(_FakeBridge()._ensure_outbox())
         finally:
             if saved is not None:
                 os.environ["PYTEST_CURRENT_TEST"] = saved
