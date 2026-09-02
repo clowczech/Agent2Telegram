@@ -1276,7 +1276,30 @@ class AttachBridge:
         if rt is not None:
             return rt.sid
         a = switcher.agent_for_tmux(self.cfg.tmux_session) or {}
-        return a.get("sid", "")
+        sid = a.get("sid", "")
+        self._remember_tmux_sid(sid)
+        return sid
+
+    def _tmux_sid_path(self) -> Path:
+        return _state_dir(self.cfg) / "last_tmux_sid"
+
+    def _remember_tmux_sid(self, sid: str) -> None:
+        """Zapamatovat konverzaci beziciho tmux panelu, aby ji spoustec po restartu obnovil.
+
+        Bez tohohle zalozi spoustec po padu PRAZDNOU session a kontext je pryc, i kdyz
+        transcript na disku zustal. Zapisuje se jen pri zmene — je to na kazde zprave.
+        """
+        if not sid or sid == getattr(self, "_last_tmux_sid", None):
+            return
+        try:
+            p = self._tmux_sid_path()
+            p.parent.mkdir(parents=True, exist_ok=True)
+            tmp = p.with_suffix(".tmp")
+            tmp.write_text(sid, encoding="utf-8")
+            tmp.replace(p)
+            self._last_tmux_sid = sid
+        except OSError as e:
+            log.warning("zapamatování tmux sid selhalo: %s", e)   # kosmetika, neblokovat
 
     def _record_origin(self, mids, *, sid: str = "", cwd: str = "", label: str = "") -> None:
         """Zapamatuj, ze prave odeslane zpravy pochazeji z dane session (pro reply routing).
@@ -1292,6 +1315,7 @@ class AttachBridge:
                     a = switcher.agent_for_tmux(self.cfg.tmux_session) or {}
                     sid, cwd = a.get("sid", ""), a.get("cwd", "")
                     label = label or self.cfg.tmux_session
+                    self._remember_tmux_sid(sid)     # ať ji spouštěč po restartu obnoví
             origins.record(_state_dir(self.cfg), mids, sid=sid, cwd=cwd, label=label)
         except Exception as e:
             log.warning("origin record failed: %s", e)

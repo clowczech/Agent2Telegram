@@ -105,3 +105,38 @@ class CommandLanguageScopeTests(unittest.TestCase):
                                side_effect=[TelegramError("bum"), None, None, None]) as call:
             c.set_my_commands([{"command": "bezi", "description": "x"}])
         self.assertEqual(call.call_count, 4)
+
+
+class TmuxSidPersistenceTests(unittest.TestCase):
+    """Po restartu ma spoustec navazat na tutez konverzaci — sid se musi ukladat."""
+
+    def _bridge(self):
+        from tests.test_attach_queue import _bridge
+        b = _bridge()
+        b.cfg.agent = "claude-code"
+        return b
+
+    def test_sid_is_written_on_lookup(self):
+        b = self._bridge()
+        with mock.patch.object(attach.switcher, "agent_for_tmux",
+                               return_value={"sid": "s-42", "cwd": "/tmp"}):
+            self.assertEqual(b._current_target_sid(), "s-42")
+        self.assertEqual(b._tmux_sid_path().read_text("utf-8"), "s-42")
+
+    def test_empty_sid_does_not_overwrite(self):
+        b = self._bridge()
+        b._remember_tmux_sid("s-42")
+        b._remember_tmux_sid("")
+        self.assertEqual(b._tmux_sid_path().read_text("utf-8"), "s-42")
+
+    def test_resume_target_wins_and_is_not_recorded_as_tmux(self):
+        b = self._bridge()
+        b._remember_tmux_sid("s-tmux")
+        b._resume_target = attach.switcher.ResumeTarget("s-resume", "/tmp", "Jinde")
+        self.assertEqual(b._current_target_sid(), "s-resume")
+        self.assertEqual(b._tmux_sid_path().read_text("utf-8"), "s-tmux")
+
+    def test_write_failure_is_survivable(self):
+        b = self._bridge()
+        with mock.patch.object(attach.Path, "replace", side_effect=OSError("plný disk")):
+            b._remember_tmux_sid("s-42")        # nesmí vyhodit výjimku
