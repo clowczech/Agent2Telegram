@@ -226,6 +226,27 @@ def _tmux(*args: str, check: bool = True, timeout: float = 10) -> subprocess.Com
     return subprocess.run(["tmux", *args], capture_output=True, text=True, check=check, timeout=timeout)
 
 
+#: Dlouhý text se do panelu NESMÍ poslat jedním send-keys. 2. 9. 2026 dorazila z hlasovky
+#: (přepis ~2 500 znaků) jen poslední třetina — chyběl i marker „[voice transcript]" ze
+#: začátku, takže se ztratil ZAČÁTEK, ne konec. Macovské tty při přeplnění vstupní fronty
+#: (TTYHOG ≈ 1 024 B) zahodí, co ve frontě už bylo; TUI čte pomaleji, než tmux píše.
+#: Po kouskách s pauzou má čtečka čas frontu vyprázdnit.
+INJECT_CHUNK_BYTES = 400
+INJECT_CHUNK_PAUSE = 0.08
+
+
+def _po_kouskach(text: str):
+    """Rozdělí text na kusy ≤ INJECT_CHUNK_BYTES bajtů UTF-8, nikdy uprostřed znaku."""
+    b = text.encode("utf-8")
+    i = 0
+    while i < len(b):
+        j = min(i + INJECT_CHUNK_BYTES, len(b))
+        while j < len(b) and (b[j] & 0xC0) == 0x80:
+            j += 1
+        yield b[i:j].decode("utf-8")
+        i = j
+
+
 class TmuxSession:
     """A live agent running in a detached tmux session, fed via send-keys."""
 
@@ -289,7 +310,10 @@ class TmuxSession:
             raise SessionError(
                 f"someone is typing in tmux session '{self.name}' — deferring the injection")
         _tmux("send-keys", "-t", self.name, "C-u"); time.sleep(0.05)
-        _tmux("send-keys", "-t", self.name, "-l", "--", text); time.sleep(0.15)
+        for kus in _po_kouskach(text):
+            _tmux("send-keys", "-t", self.name, "-l", "--", kus)
+            time.sleep(INJECT_CHUNK_PAUSE)
+        time.sleep(0.15)
         _tmux("send-keys", "-t", self.name, "Enter")
 
     def _human_is_typing(self) -> bool:

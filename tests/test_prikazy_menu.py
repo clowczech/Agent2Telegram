@@ -140,3 +140,20 @@ class TmuxSidPersistenceTests(unittest.TestCase):
         b = self._bridge()
         with mock.patch.object(attach.Path, "replace", side_effect=OSError("plný disk")):
             b._remember_tmux_sid("s-42")        # nesmí vyhodit výjimku
+
+
+class ChunkedInjectionTests(unittest.TestCase):
+    """Dlouhý text jde do panelu po kouskách — jinak tty zahodí začátek (2. 9. 2026)."""
+
+    def test_chunks_respect_utf8_boundaries_and_reassemble(self):
+        from agent2telegram import session
+        text = "žluťoučký kůň úpěl ďábelské ódy " * 60          # ~2 000 znaků, 2B znaky
+        kusy = list(session._po_kouskach(text))
+        self.assertGreater(len(kusy), 1)
+        self.assertEqual("".join(kusy), text)
+        for k in kusy:
+            self.assertLessEqual(len(k.encode("utf-8")), session.INJECT_CHUNK_BYTES + 3)
+
+    def test_short_text_is_one_chunk(self):
+        from agent2telegram import session
+        self.assertEqual(list(session._po_kouskach("ahoj")), ["ahoj"])

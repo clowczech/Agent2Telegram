@@ -1227,6 +1227,7 @@ class AttachBridge:
             text = self._transcribe(msg.get("voice") or msg.get("audio"), chat_id) or text
             if not text:
                 return True
+            self._save_transcript(msg, text)
             # The agent MUST know it is reading a machine transcript, not written text. Without
             # this it treats the transcript as verbatim and, on an error, sees nonsense instead
             # of a mis-recognition: a voice note once transcribed into the wrong language entirely
@@ -1270,6 +1271,25 @@ class AttachBridge:
         return f"[replying to: {quote}]\n{text}"
 
     # ---- reply routing (fork addition) ----------------------------------------
+    def _save_transcript(self, msg: dict, text: str) -> None:
+        """Přepis hlasovky uložit na disk DŘÍV, než se pošle do terminálu.
+
+        2. 9. 2026 dorazila do session jen třetina přepisu a nikde nezůstala kopie —
+        zvuk se po přepisu maže a inbox se po doručení vyprázdní. Přepis je to jediné,
+        co Jan namluvil; nesmí záviset na tom, co dojede přes tmux. Best-effort.
+        """
+        try:
+            d = _state_dir(self.cfg) / "voice"
+            d.mkdir(parents=True, exist_ok=True)
+            stamp = time.strftime("%Y-%m-%d_%H%M%S")
+            p = d / f"{stamp}_{msg.get('message_id', 0)}.txt"
+            p.write_text(text, encoding="utf-8")
+            log.info("STT přepis %d znaků → %s", len(text), p.name)
+            for old in sorted(d.glob("*.txt"))[:-50]:      # držet posledních 50
+                old.unlink()
+        except OSError as e:
+            log.warning("uložení přepisu selhalo: %s", e)
+
     def _current_target_sid(self) -> str:
         """Session id zprava od Jana normalne skonci v: resume cil, jinak tmux pane."""
         rt = getattr(self, "_resume_target", None)
