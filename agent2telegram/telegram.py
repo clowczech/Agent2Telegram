@@ -193,12 +193,22 @@ class TelegramClient:
     def get_me(self) -> dict:
         return self._call("getMe", timeout=15)
 
+    #: Klient si o nabidku rika PRO SVUJ JAZYK a teprve pak sahne po vychozi. Jan ma Telegram
+    #: v anglictine a videl starou anglickou nabidku i po prekladu do cestiny (1. 9. 2026) —
+    #: proto se tentyz seznam registruje i pod tyhle jazyky, ne jen do vychoziho rozsahu.
+    COMMAND_LANGUAGES = ("", "en", "cs", "sk")
+
     def set_my_commands(self, commands: list[dict]) -> None:
         """Register the bot's command list so Telegram shows the ``/`` autocomplete menu."""
-        try:
-            self._call("setMyCommands", {"commands": json.dumps(commands)}, timeout=15)
-        except TelegramError as e:
-            log.warning("setMyCommands failed: %s", e)   # cosmetic; never block startup
+        payload = json.dumps(commands)
+        for lang in self.COMMAND_LANGUAGES:
+            data = {"commands": payload}
+            if lang:
+                data["language_code"] = lang
+            try:
+                self._call("setMyCommands", data, timeout=15)
+            except TelegramError as e:
+                log.warning("setMyCommands(%s) failed: %s", lang or "default", e)  # cosmetic
 
     def get_updates(self, offset: int, *, timeout: int = 50) -> list[dict]:
         # Network timeout must exceed the long-poll timeout, else we'd cancel mid-poll.

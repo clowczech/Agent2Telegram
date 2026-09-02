@@ -85,3 +85,23 @@ class NewCommandDispatchTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CommandLanguageScopeTests(unittest.TestCase):
+    """Nabidka se musi registrovat i pro jazyk klienta — Jan ma Telegram v anglictine."""
+
+    def test_commands_are_registered_for_every_language(self):
+        from agent2telegram.telegram import TelegramClient
+        c = TelegramClient.__new__(TelegramClient)
+        with mock.patch.object(TelegramClient, "_call") as call:
+            c.set_my_commands([{"command": "bezi", "description": "x"}])
+        langs = [call.args[1].get("language_code", "") for call in call.call_args_list]
+        self.assertEqual(langs, list(TelegramClient.COMMAND_LANGUAGES))
+
+    def test_one_failing_language_does_not_stop_the_rest(self):
+        from agent2telegram.telegram import TelegramClient, TelegramError
+        c = TelegramClient.__new__(TelegramClient)
+        with mock.patch.object(TelegramClient, "_call",
+                               side_effect=[TelegramError("bum"), None, None, None]) as call:
+            c.set_my_commands([{"command": "bezi", "description": "x"}])
+        self.assertEqual(call.call_count, 4)
