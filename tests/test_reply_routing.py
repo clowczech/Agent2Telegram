@@ -53,12 +53,12 @@ class RoutingDecisionTests(unittest.TestCase):
         from agent2telegram.config import _state_dir
         origins.record(_state_dir(b.cfg), [77], sid="cizi-sid", cwd="/tmp", label="Hlídač X")
         with mock.patch.object(b, "_current_target_sid", return_value="muj-sid"), \
-             mock.patch.object(b, "_routed_reply_worker") as worker, \
-             mock.patch("threading.Thread") as thr:
+             mock.patch.object(b, "_routed_reply_worker") as worker:
             routed = b._maybe_route_reply(self._reply_msg(77), "udelej to", 7)
         self.assertTrue(routed)
-        thr.assert_called_once()
-        self.assertIs(thr.call_args.kwargs["target"], worker)
+        # Volá se SYNCHRONNĚ (3. 9. 2026): durable záznam se smí smazat až po doručení.
+        worker.assert_called_once()
+        self.assertEqual(worker.call_args.args[0]["sid"], "cizi-sid")
 
     def test_reply_to_own_message_stays_local(self):
         b = self._bridge()
@@ -113,3 +113,24 @@ class RoutedWorkerTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ChatScopedOriginsTests(unittest.TestCase):
+    """message_id je unikatni jen v ramci chatu — klic proto musi mit i chat (Codex 3. 9.)."""
+
+    def test_same_message_id_in_two_chats_does_not_collide(self):
+        with tempfile.TemporaryDirectory() as td:
+            origins.record(Path(td), [5], sid="a", cwd="/x", chat_id=111)
+            origins.record(Path(td), [5], sid="b", cwd="/y", chat_id=222)
+            self.assertEqual(origins.lookup(Path(td), 5, chat_id=111)["sid"], "a")
+            self.assertEqual(origins.lookup(Path(td), 5, chat_id=222)["sid"], "b")
+
+    def test_old_records_without_chat_still_resolve(self):
+        with tempfile.TemporaryDirectory() as td:
+            origins.record(Path(td), [7], sid="stary", cwd="/x")
+            self.assertEqual(origins.lookup(Path(td), 7, chat_id=999)["sid"], "stary")
+
+    def test_record_from_other_chat_is_not_used(self):
+        with tempfile.TemporaryDirectory() as td:
+            origins.record(Path(td), [9], sid="a", cwd="/x", chat_id=111)
+            self.assertIsNone(origins.lookup(Path(td), 9, chat_id=222))

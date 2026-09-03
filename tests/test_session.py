@@ -10,18 +10,19 @@ from agent2telegram.session import MAX_TMUX_INJECTION_CHARS, SessionError, TmuxS
 class SanitizeForTmuxTests(unittest.TestCase):
     def test_regular_text_is_unchanged(self):
         text = "Hello, world 123. Regular punctuation: []{};:,./?\n\tDone."
-        self.assertEqual(sanitize_for_tmux(text), text)
+        self.assertEqual(sanitize_for_tmux(text), text.replace("\t", " "))
 
     def test_empty_text_stays_empty(self):
         self.assertEqual(sanitize_for_tmux(""), "")
 
     def test_unicode_is_preserved(self):
         text = "Grüße ✅ Привет こんにちは 🚀"
-        self.assertEqual(sanitize_for_tmux(text), text)
+        self.assertEqual(sanitize_for_tmux(text), text.replace("\t", " "))
 
     def test_control_characters_are_stripped_except_newline_and_tab(self):
         control_chars = "".join(chr(i) for i in [*range(0x20), 0x7f, *range(0x80, 0xa0)])
-        self.assertEqual(sanitize_for_tmux(f"a{control_chars}b"), "a\t\nb")
+        # Tabulator uz nepropousti — TUI by ho vzalo jako klavesu (doplnovani/vyber), 3. 9. 2026.
+        self.assertEqual(sanitize_for_tmux(f"a{control_chars}b"), "a \nb")
 
     def test_text_is_truncated(self):
         text = "x" * (MAX_TMUX_INJECTION_CHARS + 1)
@@ -65,7 +66,7 @@ class TmuxSessionSendKeysTests(unittest.TestCase):
         calls = [call.args for call in tmux.call_args_list]
         literal = [c[-1] for c in calls if c[:5] == ("send-keys", "-t", "a2t-test", "-l", "--")]
         submits = [c for c in calls if c == ("send-keys", "-t", "a2t-test", "Enter")]
-        self.assertEqual(literal, ["first line second line third\tline"])
+        self.assertEqual(literal, ["first line second line third line"])
         self.assertEqual(len(submits), 1)
 
     def test_allowed_agent_pane_allows_injection(self):

@@ -145,6 +145,7 @@ def _bridge(state_dir=None):
     b._use_durable_outbox = False       # focused inbound tests use the legacy in-memory fake
     b._pending_send = []
     b._turn_active = threading.Event()
+    b._resume_lock = threading.Lock()
     b._turn_from_tg = False
     b._transcript = None
     b._last_activity = 0.0

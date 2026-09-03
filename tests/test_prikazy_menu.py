@@ -199,3 +199,22 @@ class CopyModeGuardTests(unittest.TestCase):
              mock.patch.object(S.time, "sleep"):
             sess._send_keys("ahoj")
         self.assertNotIn(("send-keys", "-t", "t", "-X", "cancel"), calls)
+
+
+class ShellPaneFailClosedTests(unittest.TestCase):
+    """Panel na shellu = zadna injekce, i kdyz v podstromu bezi neco jako agent (Codex P1)."""
+
+    def test_shell_pane_is_refused(self):
+        from agent2telegram import session as S
+        with mock.patch.object(S, "_pane_value", return_value="zsh"), \
+             mock.patch.object(S, "_pane_processes",
+                               return_value=[(1, 0, "python", "python monitor-claude.py")]):
+            ok, detail = S._agent_alive("t", ["claude.exe"])
+        self.assertFalse(ok)
+        self.assertIn("shell", detail)
+
+    def test_real_agent_pane_passes(self):
+        from agent2telegram import session as S
+        with mock.patch.object(S, "_pane_value", return_value="claude.exe"):
+            ok, _ = S._agent_alive("t", ["claude.exe"])
+        self.assertTrue(ok)

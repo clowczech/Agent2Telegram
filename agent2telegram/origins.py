@@ -29,7 +29,15 @@ def _dir(state_dir: Path) -> Path:
     return Path(state_dir) / "origins"
 
 
-def record(state_dir: Path, message_ids, *, sid: str, cwd: str, label: str = "") -> None:
+def _klic(chat_id, message_id) -> str:
+    """Telegram garantuje message_id jen UVNITR chatu, ne globalne — klic proto musi mit
+    i chat (nalez Codexu 3. 9. 2026). Stary tvar `<mid>.json` se cte dal, aby odpovedi
+    na zpravy z doby pred zmenou nezustaly bez puvodu."""
+    return f"{chat_id}-{message_id}" if chat_id else str(message_id)
+
+
+def record(state_dir: Path, message_ids, *, sid: str, cwd: str, label: str = "",
+           chat_id=None) -> None:
     """Remember that Telegram messages *message_ids* came from session *sid*.
 
     Best-effort: a failed write must never break the send that already happened.
@@ -42,15 +50,21 @@ def record(state_dir: Path, message_ids, *, sid: str, cwd: str, label: str = "")
     except OSError as e:
         log.warning("origins dir failed: %s", e)
         return
-    payload = json.dumps({"sid": sid, "cwd": cwd or "", "label": label or "", "ts": time.time()},
-                         ensure_ascii=False)
+    try:
+        d.chmod(0o700)
+    except OSError:
+        pass
+    payload = json.dumps({"sid": sid, "cwd": cwd or "", "label": label or "",
+                          "chat_id": chat_id, "ts": time.time()}, ensure_ascii=False)
     for mid in message_ids or ():
         if not mid:
             continue
         try:
-            tmp = d / f".{mid}.tmp"
+            # Unikatni temp: most a `notify` psaly stejne jmeno a mohly si prepsat zapis.
+            tmp = d / f".{_klic(chat_id, mid)}.{os.getpid()}.{time.time_ns()}.tmp"
             tmp.write_text(payload, encoding="utf-8")
-            tmp.replace(d / f"{mid}.json")      # atomic — a reader never sees a half-write
+            os.chmod(tmp, 0o600)
+            tmp.replace(d / f"{_klic(chat_id, mid)}.json")   # atomic — reader nevidi pulku
         except OSError as e:
             log.warning("origin record for message %s failed: %s", mid, e)
     # Amortized cleanup: roughly one send in fifty pays for the pruning walk.
@@ -58,13 +72,20 @@ def record(state_dir: Path, message_ids, *, sid: str, cwd: str, label: str = "")
         prune(state_dir)
 
 
-def lookup(state_dir: Path, message_id) -> dict | None:
+def lookup(state_dir: Path, message_id, chat_id=None) -> dict | None:
     """Origin of Telegram message *message_id*, or None when unknown/expired."""
     if not message_id:
         return None
-    try:
-        d = json.loads((_dir(state_dir) / f"{message_id}.json").read_text("utf-8"))
-    except (OSError, ValueError):
+    d = None
+    for jmeno in (f"{_klic(chat_id, message_id)}.json", f"{message_id}.json"):
+        try:
+            d = json.loads((_dir(state_dir) / jmeno).read_text("utf-8"))
+            break
+        except (OSError, ValueError):
+            continue
+    if d is None:
+        return None
+    if chat_id and d.get("chat_id") not in (None, chat_id):
         return None
     if time.time() - d.get("ts", 0) > MAX_AGE_DAYS * 86400:
         return None

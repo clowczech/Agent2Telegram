@@ -65,9 +65,14 @@ def sanitize_for_tmux(text: str) -> str:
     """Drop terminal control bytes that tmux would otherwise pass to the live TUI."""
     out = []
     for ch in text:
+        # Tabulator je pro TUI klavesa (doplnovani, prepnuti vyberu), ne znak. Prevadi se
+        # na mezeru — jako jediny z "povolenych" ridicich znaku mohl neco vybrat nebo
+        # potvrdit (nalez Codexu 3. 9. 2026).
+        if ch == "\t":
+            ch = " "
         codepoint = ord(ch)
         if (
-            ch not in "\n\t"
+            ch != "\n"
             and (codepoint < 0x20 or codepoint == 0x7f or 0x80 <= codepoint <= 0x9f)
         ):
             continue
@@ -198,6 +203,14 @@ def _agent_alive(target: str, expected_commands: list[str] | tuple[str, ...] | s
     expected_s = ", ".join(expected)
     if current_name in expected:
         return True, f"tmux pane command is {current_name}"
+
+    # FAIL-CLOSED u shellu. Kdyz je aktualnim prikazem panelu shell, panel ceka na prompt —
+    # a je jedno, ze nekde v podstromu bezi `python monitor-claude.py`, ktery vypada jako agent.
+    # Driv takovy potomek prehlasil vysledek na "agent zije" a send-keys pak poslal Januv text
+    # jako SHELLOVY PRIKAZ (nalez Codexu 3. 9. 2026, P1).
+    if current_name in _SHELL_COMMANDS:
+        return False, (f"tmux pane command is a shell ({current_name}); expected {expected_s} "
+                       "— odmítám injekci, i kdyby v podstromu běželo něco, co vypadá jako agent")
 
     # Security guard: send-keys must only target a live agent TUI. tmux may report a
     # stale title or a login shell as the pane command, so first search the pane's full
