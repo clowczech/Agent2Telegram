@@ -319,7 +319,10 @@ class TmuxSession:
         # v promptu text, zprávu radši odložíme (SessionError → durable inbox ji za 30 s
         # zkusí znovu), než mu smazat rozepsanou větu. Samotné připojení nevadí — teprve
         # připojení + neprázdný prompt.
-        if self._human_is_typing():
+        # Kontrola TESNE pred C-u a fail-closed: kdyz se stav nepodari zjistit, radsi odlozit.
+        # Driv se chyba vyhodnotila jako "nikdo nepise" a C-u pak smazalo cloveku rozepsanou
+        # vetu; okno mezi kontrolou a mazanim je tim zuzene na minimum (Codex 3. 9. 2026).
+        if self._human_is_typing(fail_closed=True):
             raise SessionError(
                 f"someone is typing in tmux session '{self.name}' — deferring the injection")
         # Panel v copy-mode (rolování, náhodný klik) literal klávesy NEPŘIJME — send-keys vrátí 1
@@ -344,8 +347,11 @@ class TmuxSession:
             return False
         return out == "1"
 
-    def _human_is_typing(self) -> bool:
-        """True when a human client is attached AND the TUI prompt line holds text."""
+    def _human_is_typing(self, fail_closed: bool = False) -> bool:
+        """True when a human client is attached AND the TUI prompt line holds text.
+
+        `fail_closed=True`: kdyz se stav nepodari zjistit, vrat True (= radsi neposilat).
+        """
         try:
             attached = _tmux("display-message", "-p", "-t", self.name,
                              "#{session_attached}", check=False, timeout=3).stdout.strip()
@@ -357,7 +363,9 @@ class TmuxSession:
                     return len(ls.lstrip("❯").strip()) > 0
             return False
         except Exception:
-            return False        # při pochybách neblokovat doručení
+            # Fail-closed jen tam, kde hrozí smazání rozepsané věty (těsně před C-u);
+            # jinde by "nevím" blokovalo doručení zbytečně.
+            return fail_closed
 
     def _capture(self) -> str:
         return _tmux("capture-pane", "-p", "-t", self.name, check=False).stdout

@@ -767,7 +767,7 @@ class AttachBridge:
         # Whether it was a reply to a specific message matters for later diagnosis: the agent
         # gets that context, so the log must show it too (otherwise the two cannot be matched up).
         replied_to = msg.get("reply_to_message") or {}
-        quoted = (replied_to.get("text") or replied_to.get("caption") or "").replace("\n", " ")[:30]
+        quoted = _bez_tajemstvi((replied_to.get("text") or replied_to.get("caption") or "").replace("\n", " ")[:30])
         if quoted:
             log.info("IN  id=%s update=%s kind=%s reply_to=%r %r",
                      record_id, update_id, kind, quoted, preview)
@@ -881,7 +881,7 @@ class AttachBridge:
             self._mark_sent(key)
         if turn_text:
             self._turn_text_sent = True
-        log.info("FWD (send, legacy path) %r", text[:40].replace("\n", " "))
+        log.info("FWD (send, legacy path) %r", _bez_tajemstvi(text[:40].replace("\n", " ")))
         self._flush_files()
 
     def _ensure_outbox(self) -> "DurableOutbox | None":
@@ -971,7 +971,7 @@ class AttachBridge:
             # The record id and a text preview are logged ON PURPOSE: on 2026-08-01 the user
             # received one reply twice and the log could not tell whether it was the same
             # message delivered twice or two different ones. Without that, any fix is a guess.
-            preview = (rec.chunks[0][:40] if rec.chunks else "(files only)").replace("\n", " ")
+            preview = _bez_tajemstvi((rec.chunks[0][:40] if rec.chunks else "(files only)").replace("\n", " "))
             log.info("FWD (delivered) id=%s %d parts, %d attachments %r",
                      rec.record_id, len(rec.chunks), len(rec.files), preview)
 
@@ -986,7 +986,7 @@ class AttachBridge:
             self._persist_queue()
             if item.get("key"):
                 self._mark_sent(item["key"])
-            log.info("FWD (re-delivered) %r", str(item.get("text", ""))[:30])
+            log.info("FWD (re-delivered) %r", _bez_tajemstvi(str(item.get("text", ""))[:30]))
 
     # ---- inbound (Telegram → session) -------------------------------------
     def _init_inbound_worker_state(self) -> None:
@@ -1419,7 +1419,7 @@ class AttachBridge:
             except Exception:
                 pass
             return
-        log.info("FWD (routed) sid=%s %r", rt.sid[:8], reply[:40])
+        log.info("FWD (routed) sid=%s %r", rt.sid[:8], _bez_tajemstvi(reply[:40]))
         try:
             mids = self.tg.send_message(chat_id, f"↪ {label}:\n{reply}")
         except Exception as e:
@@ -1577,7 +1577,7 @@ class AttachBridge:
             # Log it: without this the daily report sees "N injects failed" but cannot tell
             # whether the user was ever told. That is the exact blind spot delivery logging
             # was added to close (2026-08-04).
-            log.info("inject failure reported to the owner %r", preview[:40])
+            log.info("inject failure reported to the owner %r", _bez_tajemstvi(preview[:40]))
         except Exception as e:
             log.warning("inject-failure notification failed: %s", e)
 
@@ -1913,7 +1913,7 @@ class AttachBridge:
                       "doručí uživateli do Telegramu — odpověz přímo a stručně.]\n" + text)
             reply = rt.send(prompt)
             self._save_resume_target()       # sid se mohl posunout (fork-follow)
-            log.info("FWD (resume) sid=%s %r", rt.sid[:8], reply[:40])
+            log.info("FWD (resume) sid=%s %r", rt.sid[:8], _bez_tajemstvi(reply[:40]))
             mids = self.tg.send_message(chat, reply)
             self._record_origin(mids, sid=rt.sid, cwd=rt.cwd, label=rt.topic or "")
             return True
@@ -1991,7 +1991,7 @@ class AttachBridge:
                 log.warning("voice reply ffmpeg conversion failed (rc=%s)", r.returncode)
                 return False
             self.tg.send_voice(self._owner_chat, ogg_path)
-            log.info("FWD (voice) %r", text[:30])
+            log.info("FWD (voice) %r", _bez_tajemstvi(text[:30]))
             return True
         except Exception as e:
             log.warning("voice reply send failed: %s", e)
@@ -2197,7 +2197,7 @@ class AttachBridge:
                 # same text, same second). The key makes the queue recognise the duplicate.
                 self._send_final(out, key=getattr(self, "_last_backstop_key", "") or None)
                 log.info("TURN END backstop → forwarded final answer from %s %r",
-                         source, out[:30])
+                         source, _bez_tajemstvi(str(out[:30])))
             elif not self._turn_text_sent:
                 dur = time.monotonic() - self._turn_started
                 log.error("TURN END backstop: Telegram turn ended without an answer; "
@@ -2436,7 +2436,7 @@ class AttachBridge:
         for raw in paths:
             resolved, reason = self._safe_outbox_path(raw)
             if resolved is None:
-                log.warning("refusing to send %r: %s", raw, reason)
+                log.warning("refusing to send %r: %s", _bez_tajemstvi(str(raw)[:60]), reason)
                 self._send_final(f"⚠️ Couldn't send {Path(raw).name}: {reason}", turn_text=False)
                 continue
             try:
