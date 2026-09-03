@@ -309,12 +309,27 @@ class TmuxSession:
         if self._human_is_typing():
             raise SessionError(
                 f"someone is typing in tmux session '{self.name}' — deferring the injection")
+        # Panel v copy-mode (rolování, náhodný klik) literal klávesy NEPŘIJME — send-keys vrátí 1
+        # a most po 3 pokusech zprávu odloží do dead-letter. 3. 9. 2026 tak Janovi 5× nedošla
+        # zpráva „hlas je dobrý“. Copy-mode nic nedrží, tak ho zrušíme a jedeme dál.
+        if self._pane_in_mode():
+            log.warning("tmux pane '%s' je v copy-mode → ruším ho před vložením", self.name)
+            _tmux("send-keys", "-t", self.name, "-X", "cancel", check=False, timeout=3)
+            time.sleep(0.05)
         _tmux("send-keys", "-t", self.name, "C-u"); time.sleep(0.05)
         for kus in _po_kouskach(text):
             _tmux("send-keys", "-t", self.name, "-l", "--", kus)
             time.sleep(INJECT_CHUNK_PAUSE)
         time.sleep(0.15)
         _tmux("send-keys", "-t", self.name, "Enter")
+
+    def _pane_in_mode(self) -> bool:
+        try:
+            out = _tmux("display-message", "-p", "-t", self.name, "#{pane_in_mode}",
+                        check=False, timeout=3).stdout.strip()
+        except Exception:
+            return False
+        return out == "1"
 
     def _human_is_typing(self) -> bool:
         """True when a human client is attached AND the TUI prompt line holds text."""

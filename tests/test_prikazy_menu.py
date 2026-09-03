@@ -157,3 +157,45 @@ class ChunkedInjectionTests(unittest.TestCase):
     def test_short_text_is_one_chunk(self):
         from agent2telegram import session
         self.assertEqual(list(session._po_kouskach("ahoj")), ["ahoj"])
+
+
+class CopyModeGuardTests(unittest.TestCase):
+    """Panel v copy-mode odmita literal send-keys → most ho musi zrusit, ne vzdat (3. 9. 2026)."""
+
+    def _sess(self):
+        from agent2telegram import session as S
+        sess = S.TmuxSession.__new__(S.TmuxSession)
+        sess.name = "t"; sess._origin = ""
+        return S, sess
+
+    def test_copy_mode_is_cancelled_before_injection(self):
+        S, sess = self._sess()
+        calls = []
+        def fake_tmux(*args, **kw):
+            calls.append(args)
+            class R: stdout = "1\n" if "#{pane_in_mode}" in args else ""
+            return R()
+        with mock.patch.object(S, "_tmux", fake_tmux), \
+             mock.patch.object(S.TmuxSession, "_human_is_typing", return_value=False), \
+             mock.patch.object(S.TmuxSession, "alive", new_callable=mock.PropertyMock, return_value=True, create=True), \
+             mock.patch.object(S, "_pane_command_ok", return_value=(True, ""), create=True), \
+             mock.patch.object(S.time, "sleep"):
+            sess._send_keys("ahoj")
+        self.assertIn(("send-keys", "-t", "t", "-X", "cancel"), calls)
+        self.assertLess(calls.index(("send-keys", "-t", "t", "-X", "cancel")),
+                        calls.index(("send-keys", "-t", "t", "C-u")))
+
+    def test_no_cancel_when_not_in_mode(self):
+        S, sess = self._sess()
+        calls = []
+        def fake_tmux(*args, **kw):
+            calls.append(args)
+            class R: stdout = "0\n" if "#{pane_in_mode}" in args else ""
+            return R()
+        with mock.patch.object(S, "_tmux", fake_tmux), \
+             mock.patch.object(S.TmuxSession, "_human_is_typing", return_value=False), \
+             mock.patch.object(S.TmuxSession, "alive", new_callable=mock.PropertyMock, return_value=True, create=True), \
+             mock.patch.object(S, "_pane_command_ok", return_value=(True, ""), create=True), \
+             mock.patch.object(S.time, "sleep"):
+            sess._send_keys("ahoj")
+        self.assertNotIn(("send-keys", "-t", "t", "-X", "cancel"), calls)
