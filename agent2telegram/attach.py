@@ -162,6 +162,23 @@ _TUI_VERBS = {"Read": "📄", "List": "📂", "Search": "🔎", "Ran": "🛠️"
               "Deleted": "🗑️", "Removed": "🗑️"}
 
 
+#: Delsi souvisly retezec bez mezer, ktery vypada jako klic/token — v logu nema co delat.
+#: 3. 9. 2026 se takhle do `agent2telegram.log` (mod 0644) dostal Januv Things autorizacni
+#: token, protoze most loguje prvnich 40 znaku kazde prichozi zpravy. Nasel to Codex pri revizi.
+_TAJEMSTVI = _re.compile(r"[A-Za-z0-9_\-]{16,}")
+_TAJNE_SLOVO = _re.compile(r"(?i)(token|heslo|password|api[_-]?key|secret|auth)")
+
+
+def _bez_tajemstvi(text: str) -> str:
+    """Nahradi v nahledu do logu vse, co vypada jako tajemstvi. Nahled se loguje schvalne
+    (1. 8. 2026 se ztratila zprava a bez nej nesla dohledat) — jen uz ne i s klicem."""
+    if not text:
+        return text
+    if _TAJNE_SLOVO.search(text):
+        return _TAJEMSTVI.sub("[redigováno]", text)
+    return _TAJEMSTVI.sub(lambda m: m.group(0) if len(m.group(0)) < 24 else "[redigováno]", text)
+
+
 def _bridge_command(text: str) -> str | None:
     """Return the slash command the bridge should answer itself, or None to forward the message.
 
@@ -743,7 +760,7 @@ class AttachBridge:
             kind = "reaction"
         else:
             kind = "text"
-        preview = (msg.get("text") or msg.get("caption") or "").replace("\n", " ")[:40]
+        preview = _bez_tajemstvi((msg.get("text") or msg.get("caption") or "").replace("\n", " ")[:40])
         # Whether it was a reply to a specific message matters for later diagnosis: the agent
         # gets that context, so the log must show it too (otherwise the two cannot be matched up).
         replied_to = msg.get("reply_to_message") or {}
