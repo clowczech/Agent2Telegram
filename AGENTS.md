@@ -1,3 +1,43 @@
+# Agent2Telegram — pravidla projektu
+
+Náš fork `clowczech/Agent2Telegram` (větev `jan-mini`). Most mezi Telegramem a Claude Code;
+běží jako launchd služba `com.claude.telegram-most` na mini.
+
+## Tvrdá pravidla
+- **Je to jediná cesta zvenčí do sessions s auto režimem.** Každá změna v přijímání zpráv,
+  injekci do tmuxu nebo routingu odpovědí je bezpečnostní změna — testy povinné.
+- Restart služby = Janovo svolení (přeruší mu konverzaci).
+- **Všechny cílové sessions žijí v tmuxu.** Session, která neběží, most sám založí v tmuxu
+  (`claude --resume <sid>` v cwd konverzace); session běžící v appce odmítne. Žádná headless
+  `claude -p` větev — v auto režimu neuměla skoro nic a každá zpráva forkla nový sid (7. 9. 2026).
+- Testy MUSÍ běžet nad `AGENT2TELEGRAM_STATE` v tempdiru (`tests/__init__.py`), jinak
+  zapisují do ostrého stavu mostu.
+- V pravidlech pro `--allowedTools` se cesty píšou `~/…`; absolutní `/Users/…` se nepáruje.
+- **Odpověď, kterou vrátil Stop hook, se do Telegramu nesmí dostat.** Blok se pozná ze tří
+  záznamů za zamítnutou odpovědí (`user` s `isMeta` a „Stop hook feedback:“, `attachment`
+  s `hook_blocking_error`, `system`/`stop_hook_summary` s neprázdným `hookErrors`);
+  `preventedContinuation` je i tehdy `false` a jako signál se použít NESMÍ. Kandidát na finální
+  odpověď (assistant záznam bez volání nástroje) proto chvíli čeká, než odejde — viz README
+  „A reply a Stop hook took back“.
+- **Náš Stop hook píše značku `turn_end` i u zablokovaného turnu.** Test na blok musí být
+  v `_outbound_loop` VŽDY před větví se značkou. Když byl za ní (6.–7. 9. 2026), oprava
+  nikdy nefungovala a Jan dostával odpovědi dvakrát.
+- **Záznam `user` s `isMeta: true` není zpráva od člověka.** Nesmí určovat původ turnu ani
+  bod, na který se most po restartu převíjí — jinak se turn překlasifikuje na terminálový
+  a odpověď se nikdy nepřepošle.
+
+Historie, pasti a rozhodnutí → domácí paměť `agent2telegram-most`.
+
+---
+
+# ⬇️ Níže je PŮVODNÍ upstream playbook (`clowczech/Agent2Telegram`)
+
+Není náš — je to instalační recept od autora projektu pro cizí stroj. Naše pravidla jsou
+výše. Když se obojí rozchází, platí naše. Sloučeno 21. 9. 2026 při sjednocení pravidel do
+`AGENTS.md`; do té doby byla naše pravidla v `CLAUDE.md`, kde je Codex nikdy neviděl.
+
+---
+
 # AGENTS.md — install playbook for an AI agent
 
 > This file is written **for an AI coding agent** (Codex, Claude Code…)
